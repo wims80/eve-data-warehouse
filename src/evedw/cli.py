@@ -1,6 +1,9 @@
 """The ``evedw`` command line. Commands trigger jobs or report; import logic lives in jobs."""
 
+from collections.abc import Generator
+from contextlib import contextmanager
 from dataclasses import dataclass
+from datetime import date, datetime
 from pathlib import Path
 from typing import Annotated
 
@@ -8,12 +11,20 @@ import typer
 
 from evedw import __version__
 from evedw.config import Settings
-from evedw.domain.datasets import DATASETS
-from evedw.jobs.runner import LockHeldError, WriterLock
+from evedw.domain.datasets import DATASETS, get_dataset
+from evedw.domain.registry import Trigger
+from evedw.jobs.importers import importer_for
+from evedw.jobs.runner import JobRunner, LockHeldError, WriterLock
+from evedw.jobs.sync import SyncJob
+from evedw.jobs.verify import VerifyReport, verify_dataset
 from evedw.logs import setup_logging
-from evedw.store import open_registry
+from evedw.sources.everef import EveRefClient
+from evedw.store import open_lake, open_registry
+from evedw.store.base import Registry
 
 app = typer.Typer(no_args_is_help=True, add_completion=False, help="EVE data warehouse.")
+
+DATE_FORMATS = ["%Y-%m-%d"]
 
 
 @dataclass(slots=True)
@@ -26,6 +37,27 @@ def _state(ctx: typer.Context) -> CliState:
     if not isinstance(state, CliState):
         raise RuntimeError("CLI state missing")
     return state
+
+
+def _day(value: datetime | None) -> date | None:
+    return value.date() if value is not None else None
+
+
+@contextmanager
+def _writer(settings: Settings) -> Generator[tuple[WriterLock, Registry]]:
+    settings.ensure_dirs()
+    try:
+        lock = WriterLock(settings.lock_path)
+        lock.acquire()
+    except LockHeldError as exc:
+        typer.echo(f"error: {exc}", err=True)
+        raise typer.Exit(code=1) from None
+    registry = open_registry(settings)
+    try:
+        yield lock, registry
+    finally:
+        registry.close()
+        lock.release()
 
 
 @app.callback()
@@ -58,18 +90,9 @@ def version() -> None:
 def migrate(ctx: typer.Context) -> None:
     """Create or upgrade the registry schema."""
     settings = _state(ctx).settings
-    settings.ensure_dirs()
-    try:
-        with WriterLock(settings.lock_path):
-            registry = open_registry(settings)
-            try:
-                before = registry.schema_version()
-                after = registry.migrate()
-            finally:
-                registry.close()
-    except LockHeldError as exc:
-        typer.echo(f"error: {exc}", err=True)
-        raise typer.Exit(code=1) from None
+    with _writer(settings) as (_, registry):
+        before = registry.schema_version()
+        after = registry.migrate()
     if after == before:
         print(f"registry schema is current at version {after}")
     else:
@@ -126,3 +149,122 @@ def status(ctx: typer.Context) -> None:
                 )
     finally:
         registry.close()
+
+
+@app.command()
+def sync(
+    ctx: typer.Context,
+    dataset: Annotated[str, typer.Argument(help="Dataset name, e.g. market_history.")],
+    date_from: Annotated[
+        datetime | None,
+        typer.Option("--from", formats=DATE_FORMATS, help="Earliest day, inclusive."),
+    ] = None,
+    date_to: Annotated[
+        datetime | None,
+        typer.Option("--to", formats=DATE_FORMATS, help="Latest day, inclusive."),
+    ] = None,
+    force: Annotated[
+        bool, typer.Option("--force", help="Re-import already imported days in range.")
+    ] = False,
+) -> None:
+    """Discover, fetch and import changed objects of a dataset, newest first."""
+    settings = _state(ctx).settings
+    try:
+        ds = get_dataset(dataset)
+    except KeyError as exc:
+        typer.echo(f"error: {exc.args[0]}", err=True)
+        raise typer.Exit(code=2) from None
+    with _writer(settings) as (lock, registry):
+        if registry.schema_version() == 0:
+            typer.echo("error: registry is not migrated; run `evedw migrate`", err=True)
+            raise typer.Exit(code=1)
+        lake = open_lake(settings)
+        client = EveRefClient(settings.everef_base_url, contact=settings.esi_contact)
+        try:
+            job = SyncJob(
+                dataset=ds,
+                client=client,
+                importer=importer_for(ds, lake),
+                date_from=_day(date_from),
+                date_to=_day(date_to),
+                force=force,
+            )
+            params = {"from": _day(date_from), "to": _day(date_to), "force": force}
+            try:
+                run = JobRunner(settings, registry, lock).run(
+                    f"sync:{ds.name}", job, trigger=Trigger.CLI, params=params
+                )
+            except Exception as exc:
+                typer.echo(f"error: {exc}", err=True)
+                raise typer.Exit(code=1) from None
+        finally:
+            client.close()
+    print(
+        f"run {run.run_id} {run.status.value}: {run.objects_changed} objects imported, "
+        f"{run.rows_written} rows written"
+    )
+
+
+@app.command()
+def verify(
+    ctx: typer.Context,
+    dataset: Annotated[str | None, typer.Option("--dataset", help="Limit to one dataset.")] = None,
+    date_from: Annotated[datetime | None, typer.Option("--from", formats=DATE_FORMATS)] = None,
+    date_to: Annotated[datetime | None, typer.Option("--to", formats=DATE_FORMATS)] = None,
+    as_json: Annotated[bool, typer.Option("--json", help="Machine-readable output.")] = False,
+    no_hash: Annotated[
+        bool, typer.Option("--no-hash", help="Skip hashing retained raw files.")
+    ] = False,
+    offline: Annotated[
+        bool, typer.Option("--offline", help="Do not fetch totals.json for count checks.")
+    ] = False,
+) -> None:
+    """Check registry, lake and raw files against each other and upstream totals."""
+    settings = _state(ctx).settings
+    names = [dataset] if dataset else [n for n in DATASETS if DATASETS[n].index_path]
+    try:
+        datasets = [get_dataset(n) for n in names]
+    except KeyError as exc:
+        typer.echo(f"error: {exc.args[0]}", err=True)
+        raise typer.Exit(code=2) from None
+    settings.ensure_dirs()
+    registry = open_registry(settings, read_only=True)
+    lake = open_lake(settings)
+    client = (
+        None if offline else EveRefClient(settings.everef_base_url, contact=settings.esi_contact)
+    )
+    failed = False
+    try:
+        reports: list[VerifyReport] = []
+        for ds in datasets:
+            totals = client.totals(ds) if client is not None and ds.totals_path else None
+            report = verify_dataset(
+                settings,
+                registry,
+                lake,
+                ds,
+                date_from=_day(date_from),
+                date_to=_day(date_to),
+                hash_raw=not no_hash,
+                totals=totals,
+            )
+            reports.append(report)
+            failed = failed or not report.ok
+        if as_json:
+            print("[" + ",\n".join(r.to_json() for r in reports) + "]")
+        else:
+            for report in reports:
+                print(report.to_text())
+    finally:
+        registry.close()
+        if client is not None:
+            client.close()
+    if failed:
+        raise typer.Exit(code=1)
+
+
+@app.command()
+def views(ctx: typer.Context) -> None:
+    """Print DuckDB view DDL for consumers that read the lake directly."""
+    settings = _state(ctx).settings
+    print(open_lake(settings).view_sql(), end="")

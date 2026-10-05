@@ -45,6 +45,9 @@ src = ["src", "tests"]
 select = ["E", "F", "I", "UP", "B", "SIM", "RUF", "DTZ", "PTH", "T20"]
 ignore = ["T201"]
 
+[tool.ruff.lint.isort]
+known-first-party = ["evedw", "tests"]
+
 [tool.ruff.lint.per-file-ignores]
 "docs/prototypes/*" = ["T20"]
 
@@ -53,6 +56,9 @@ include = ["src", "tests"]
 typeCheckingMode = "strict"
 pythonVersion = "3.13"
 reportMissingTypeStubs = false
+# pyarrow-stubs leaves many signatures partially typed; these two rules only report that noise.
+reportUnknownMemberType = false
+reportUnknownArgumentType = false
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

@@ -167,6 +167,13 @@ PARTITION_COLUMN: dict[str, str] = {
     "market_history": "date",
 }
 
+DATASET_TABLES: dict[str, tuple[str, ...]] = {
+    "killmails": ("killmails", "attackers", "items"),
+    "market_history": ("market_history",),
+}
+"""Lake tables each dataset fills. The first table is the one whose row count is the
+object's ``observed_count``."""
+
 # --- registry ---------------------------------------------------------------------------
 
 SOURCE_OBJECT = pa.schema(

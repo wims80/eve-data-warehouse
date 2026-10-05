@@ -1,6 +1,6 @@
 # Implementation plan
 
-Status: M0 complete (2026-10-05). Next: M1.
+Status: M0 and M1 complete (2026-10-05). Next: M2.
 
 Milestones are ordered so that each one leaves a working, testable system.
 Do not start a milestone before the previous one's acceptance checks pass.

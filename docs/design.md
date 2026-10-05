@@ -168,8 +168,8 @@ data/
   writer.lock                      flock held by the single writer
   raw/
     killmails/2026/killmails-2026-10-01/<sha256>.tar.bz2
-    market-history/2026/market-history-2026-10-01/<sha256>.csv.bz2
-    entities/backfills/<sha256>.tar.bz2
+    market_history/2026/market-history-2026-10-01/<sha256>.csv.bz2
+    entities_backfill/<year>/<name>/<sha256>.tar.bz2
   lake/
     killmails/source_date=2026-10-01/data.parquet
     attackers/source_date=2026-10-01/data.parquet
@@ -185,8 +185,14 @@ data/
   evidence and the regeneration source; the lake can always be rebuilt from
   them with no network.
 - The lake is the delivery contract. Any process may read it at any time.
-  Hive-style partition directories let DuckDB, Polars, pandas and Spark prune
-  by date.
+  The partition column is stored inside each file as well as in the
+  directory name, so a single file is self-describing. DuckDB reads the
+  layout as is with or without `hive_partitioning`. pyarrow's and Polars'
+  hive mode infers the directory value as a string and conflicts with the
+  date column in the file, so those readers should use plain directory
+  scans and rely on Parquet statistics for date pruning, or declare the
+  partition schema as date explicitly. `evedw views` prints DuckDB view DDL
+  for consumers.
 - `warehouse.duckdb` is opened only by the service. DuckDB permits one
   writer or many readers on a file, not both, so consumers must never open
   it. Entity tables are exported to Parquet for them.
@@ -339,6 +345,10 @@ One table `market_history` partitioned by `date`: `date, region_id, type_id,
 average, highest, lowest, order_count, volume, http_last_modified`. Prices
 are `DOUBLE`, counts `BIGINT`. DuckDB reads the decompressed CSV directly with
 an explicit column list. Verification compares row count with totals.json.
+
+Measured 2026-10-05 against live EVE Ref: 34 days (2026-09-01 to 2026-10-04)
+synced in 13 s wall time, about 49k rows per day, 0.56 MB raw and 0.8 MB
+Parquet per day. A second sync with nothing changed took under two seconds.
 
 ### 7.3 Entities
 

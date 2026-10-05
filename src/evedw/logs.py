@@ -63,6 +63,7 @@ class KeyValueFormatter(logging.Formatter):
 def setup_logging(level: str = "INFO") -> None:
     root = logging.getLogger()
     root.setLevel(level.upper())
+    logging.getLogger("httpx").setLevel(logging.WARNING)
     if any(isinstance(h, _Handler) for h in root.handlers):
         return
     handler = _Handler(sys.stderr)
