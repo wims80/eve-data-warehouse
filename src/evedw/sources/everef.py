@@ -15,8 +15,10 @@ from collections.abc import Callable, Iterable
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, replace
 from datetime import datetime
+from html.parser import HTMLParser
 from pathlib import Path
 from typing import Any
+from urllib.parse import urljoin
 
 import httpx
 
@@ -97,6 +99,66 @@ def user_agent(contact: str | None) -> str:
     return f"evedw/{__version__} (local EVE data warehouse; {who})"
 
 
+class _ListingParser(HTMLParser):
+    """Rows of EVE Ref's directory page: ``<tr class="data-file">`` with the file link,
+    a ``data-file-size-bytes`` cell and a ``<time datetime="...">``."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.rows: list[dict[str, str]] = []
+        self._row: dict[str, str] | None = None
+        self._capture: str | None = None
+
+    def handle_starttag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
+        attributes = {k: v or "" for k, v in attrs}
+        classes = attributes.get("class", "").split()
+        if tag == "tr" and "data-file" in classes:
+            self._row = {}
+        elif self._row is None:
+            return
+        elif tag == "a" and "data-file-url" in classes:
+            self._row["href"] = attributes.get("href", "")
+            self._capture = "name"
+        elif tag == "td" and "data-file-size-bytes" in classes:
+            self._capture = "size"
+        elif tag == "time" and "datetime" in attributes:
+            self._row["last_modified"] = attributes["datetime"]
+
+    def handle_data(self, data: str) -> None:
+        if self._row is not None and self._capture is not None:
+            self._row[self._capture] = self._row.get(self._capture, "") + data
+
+    def handle_endtag(self, tag: str) -> None:
+        if tag in ("a", "td"):
+            self._capture = None
+        if tag == "tr" and self._row is not None:
+            self.rows.append(self._row)
+            self._row = None
+
+
+def parse_html_listing(html: str, base_url: str) -> list[IndexEntry]:
+    parser = _ListingParser()
+    parser.feed(html)
+    entries: list[IndexEntry] = []
+    for row in parser.rows:
+        href = row.get("href", "")
+        name = (row.get("name") or href).strip().rsplit("/", 1)[-1]
+        if not name:
+            continue
+        digits = row.get("size", "").replace(",", "").strip()
+        entries.append(
+            IndexEntry(
+                name=name,
+                url=urljoin(base_url, href) if href else f"{base_url}{name}",
+                size=int(digits) if digits.isdigit() else None,
+                etag=None,
+                last_modified=parse_timestamp(row.get("last_modified")),
+                file_time=None,
+            )
+        )
+    return entries
+
+
 class EveRefClient:
     def __init__(
         self,
@@ -131,7 +193,22 @@ class EveRefClient:
         response = self._get(url)
         if response is None:
             return None
-        payload: Any = response.json()
+        return self._index_entries(response.json(), url)
+
+    def listing(self, dataset: Dataset) -> list[IndexEntry]:
+        """Entries of a directory that has no per-year index. ``index.json`` is tried
+        first; EVE Ref's HTML directory listing is the fallback."""
+        base = dataset.listing_url(self.base_url)
+        response = self._get(base + "index.json")
+        if response is not None:
+            return self._index_entries(response.json(), base + "index.json")
+        response = self._get(base)
+        if response is None:
+            return []
+        return parse_html_listing(response.text, base)
+
+    @staticmethod
+    def _index_entries(payload: Any, url: str) -> list[IndexEntry]:
         # EVE Ref serves {"files": [...], "path": "..."}; accept a bare array as well.
         if isinstance(payload, dict):
             payload = payload.get("files")  # pyright: ignore[reportUnknownMemberType, reportUnknownVariableType]
@@ -177,11 +254,18 @@ class EveRefClient:
     def discover(self, dataset: Dataset, years: Iterable[int]) -> list[DiscoveredObject]:
         totals = self.totals(dataset)
         found: list[DiscoveredObject] = []
-        for year in years:
-            entries = self.year_index(dataset, year)
-            if entries is None:
-                log.info("no index for year %d", year)
-                continue
+        listed: list[tuple[int | None, list[IndexEntry]]]
+        if dataset.index_path is None:
+            listed = [(None, self.listing(dataset))]
+        else:
+            listed = []
+            for year in years:
+                entries = self.year_index(dataset, year)
+                if entries is None:
+                    log.info("no index for year %d", year)
+                    continue
+                listed.append((year, entries))
+        for year, entries in listed:
             for entry in entries:
                 day = dataset.logical_date(entry.name)
                 if day is None:
@@ -190,7 +274,9 @@ class EveRefClient:
                 found.append(
                     DiscoveredObject(
                         dataset=dataset.name,
-                        object_key=dataset.object_key(year, entry.name),
+                        object_key=dataset.object_key(
+                            year if year is not None else day.year, entry.name
+                        ),
                         url=entry.url,
                         logical_date=day,
                         etag=entry.etag,

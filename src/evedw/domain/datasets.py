@@ -24,6 +24,9 @@ class Dataset:
     """``strftime`` format of the keys in totals.json."""
     object_name_pattern: re.Pattern[str]
     """Matches an object's file name and captures the logical date in group ``date``."""
+    listing_path: str | None = None
+    """Directory under the base URL whose HTML listing is parsed when there is no
+    index.json. Its ``index.json`` is still tried first."""
 
     def years(self, today: date) -> range:
         return range(self.first_date.year, today.year + 1)
@@ -32,6 +35,11 @@ class Dataset:
         if self.index_path is None:
             raise ValueError(f"dataset {self.name} has no index")
         return f"{base_url.rstrip('/')}/{self.index_path.format(year=year)}"
+
+    def listing_url(self, base_url: str) -> str:
+        if self.listing_path is None:
+            raise ValueError(f"dataset {self.name} has no directory listing")
+        return f"{base_url.rstrip('/')}/{self.listing_path.strip('/')}/"
 
     def totals_url(self, base_url: str) -> str:
         if self.totals_path is None:
@@ -83,6 +91,7 @@ ENTITIES_BACKFILL = Dataset(
     object_name_pattern=re.compile(
         r"^eve-kill-com-karbowiak-(?P<date>\d{4}-\d{2}-\d{2})\.tar\.bz2$"
     ),
+    listing_path="characters-corporations-alliances/backfills",
 )
 
 DATASETS: dict[str, Dataset] = {d.name: d for d in (KILLMAILS, MARKET_HISTORY, ENTITIES_BACKFILL)}

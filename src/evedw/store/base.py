@@ -138,10 +138,15 @@ class Registry(Protocol):
         ...
 
     def refresh_pop(self, *, limit: int, now: datetime) -> list[RefreshEntry]:
-        """Due entries ordered by priority then ``next_due_at``. Does not remove them."""
+        """Due entries: best priority first, then never refreshed, then longest ago
+        refreshed, then earliest due. Does not remove them."""
         ...
 
     def refresh_update(self, entry: RefreshEntry) -> None: ...
+
+    def refreshed_since(self, since: datetime) -> set[tuple[str, int]]:
+        """``(kind, entity_id)`` of entries refreshed at or after ``since``."""
+        ...
 
     # -- reporting -----------------------------------------------------------------------
 
@@ -183,13 +188,51 @@ class Lake(Protocol):
 
 
 class EntityStore(Protocol):
+    """Native entity tables (design §7.3). Rows carry ``observed_at`` and ``source``."""
+
     def upsert(self, table: str, rows: pa.Table) -> int:
-        """Upsert by the table's primary key; returns rows affected."""
+        """Insert or replace by the table's primary key. An existing row is replaced only
+        when the incoming ``observed_at`` is not older, so ESI data is never overwritten by
+        an older backfill snapshot. Returns the number of rows written."""
         ...
 
-    def lookup(self, table: str, ids: Collection[int]) -> pa.Table: ...
+    def lookup(self, table: str, ids: Collection[int]) -> pa.Table:
+        """Rows whose primary entity id is in ``ids``, in the table's schema."""
+        ...
 
-    def export_parquet(self, directory: Path) -> list[Path]: ...
+    def count(self, table: str) -> int: ...
+
+    def export_parquet(self, directory: Path) -> list[Path]:
+        """Write ``<directory>/<table>.parquet`` for every entity table, atomically."""
+        ...
+
+    def close(self) -> None: ...
+
+
+@dataclass(frozen=True, slots=True)
+class CachedResponse:
+    """One cached ESI response: the body plus the validators for a conditional request."""
+
+    key: str
+    status: int
+    body: str
+    etag: str | None
+    last_modified: str | None
+    cache_control: str | None
+    observed_at: datetime
+    expires_at: datetime
+
+
+class ResponseCache(Protocol):
+    """Persistent response cache keyed by request. The ESI client is its only user."""
+
+    def get(self, key: str) -> CachedResponse | None: ...
+
+    def put(self, entry: CachedResponse) -> None: ...
+
+    def delete(self, key: str) -> None: ...
+
+    def close(self) -> None: ...
 
 
 class Queries(Protocol):

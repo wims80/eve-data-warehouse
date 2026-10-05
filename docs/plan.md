@@ -1,6 +1,6 @@
 # Implementation plan
 
-Status: M0, M1 and M2 complete (2026-10-05). Next: M3.
+Status: M0 to M3 complete (2026-10-05). Next: M4.
 
 Milestones are ordered so that each one leaves a working, testable system.
 Do not start a milestone before the previous one's acceptance checks pass.
@@ -111,6 +111,21 @@ Deliverables:
 Acceptance: seed of the 2026-05-10 backfill completes and reports counts per
 table; refresh with a mocked ESI respects pacing and budget in tests and
 stops on 420; export files are readable with plain `read_parquet`.
+
+Outcome (2026-10-05): the live seed of the 2026-05-10 archive took 4 min
+41 s end to end (77 s download, the rest extraction and import) and loaded
+20,826,709 characters, 13,067,089 employment events, 978,601 corporations,
+59,014 alliance events and 18,201 alliances, matching an independent scan
+of the archive; no unknown keys. `warehouse.duckdb` grew to 2.2 GB and the
+Parquet export is 534 MB, written in 2 s. The ESI compatibility date moved
+to 2026-08-18 after checking the live specification; routes lost their
+trailing slashes. The response cache moved from files into the store
+(`ResponseCache` Protocol) so a million cached bodies do not become a
+million files. A six-request live refresh behaved: one second between
+requests, bodies cached, budget persisted. One week of killmails yields
+about 57,000 distinct entities, so the default budget of 20,000 requests a
+day cycles the active population roughly every four days; revalidations
+cost a request each, so the budget, not the cache, is the limit.
 
 ## M4. Service
 

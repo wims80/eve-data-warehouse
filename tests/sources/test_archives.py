@@ -41,3 +41,23 @@ def test_pretty_printed_and_foreign_members_are_handled(tmp_path: Path) -> None:
     result = tar_json_to_ndjson(archive, out)
     assert result.documents == 2 and result.compacted == 1
     assert out.read_bytes() == b'{"killmail_id": 1}\n{"killmail_id":2,"victim":{"items":[]}}\n'
+
+
+def test_extract_members_streams_named_members(tmp_path: Path) -> None:
+    from evedw.sources.archives import extract_members
+
+    archive = tmp_path / "a.tar.bz2"
+    with tarfile.open(archive, "w:bz2") as tar:
+        for name, body in (
+            ("snapshot/characters.json", b"[1]"),
+            ("snapshot/notes.txt", b"skip"),
+            ("snapshot/alliances.json", b"[2,3]"),
+        ):
+            info = tarfile.TarInfo(name)
+            info.size = len(body)
+            tar.addfile(info, io.BytesIO(body))
+    found = extract_members(archive, tmp_path / "out", {"characters.json", "alliances.json"})
+    assert sorted(found) == ["alliances.json", "characters.json"]
+    assert found["characters.json"].read_bytes() == b"[1]"
+    assert found["alliances.json"] == tmp_path / "out" / "alliances.json"
+    assert not (tmp_path / "out" / "notes.txt").exists()

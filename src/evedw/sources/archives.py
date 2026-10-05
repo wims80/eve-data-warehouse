@@ -4,6 +4,7 @@ import bz2
 import json
 import logging
 import tarfile
+from collections.abc import Collection
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -22,6 +23,37 @@ def decompress_bz2(src: Path, dest: Path, *, chunk_size: int = 1 << 20) -> int:
             writer.write(chunk)
             written += len(chunk)
     return written
+
+
+def extract_members(
+    src: Path, dest_dir: Path, names: Collection[str], *, chunk_size: int = 1 << 20
+) -> dict[str, Path]:
+    """Stream the members whose base name is in ``names`` out of a tar archive.
+
+    Returns base name -> extracted path. Directory prefixes inside the archive are
+    dropped. A base name appearing twice is an error: the archive is not what we expect.
+    """
+    dest_dir.mkdir(parents=True, exist_ok=True)
+    found: dict[str, Path] = {}
+    with tarfile.open(src, "r|*") as tar:
+        for member in tar:
+            base = member.name.rsplit("/", 1)[-1]
+            if not member.isfile() or base not in names:
+                continue
+            if base in found:
+                raise ValueError(f"{src.name}: member {base!r} appears more than once")
+            fh = tar.extractfile(member)
+            if fh is None:
+                continue
+            target = dest_dir / base
+            with target.open("wb") as out:
+                while True:
+                    chunk = fh.read(chunk_size)
+                    if not chunk:
+                        break
+                    out.write(chunk)
+            found[base] = target
+    return found
 
 
 @dataclass(frozen=True, slots=True)

@@ -11,10 +11,12 @@ import duckdb
 import pyarrow as pa
 import pyarrow.parquet as pq
 
-from evedw.domain.schemas import LAKE_TABLES, PARTITION_COLUMN
+from evedw.domain.schemas import ENTITY_TABLES, LAKE_TABLES, PARTITION_COLUMN
 from evedw.store.base import PartitionInfo
 
 DATA_FILE = "data.parquet"
+ENTITIES_DIR = "entities"
+"""Subdirectory of the lake holding the entity table exports."""
 
 
 def partition_name(table: str, day: date) -> str:
@@ -153,6 +155,14 @@ class ParquetLake:
                 "CREATE OR REPLACE VIEW killmails_unique AS SELECT * FROM killmails "
                 "QUALIFY row_number() OVER "
                 "(PARTITION BY killmail_id ORDER BY source_date DESC) = 1;"
+            )
+        for table in ENTITY_TABLES:
+            path = self.lake_dir / ENTITIES_DIR / f"{table}.parquet"
+            if not path.is_file():
+                lines.append(f"-- {table}: not exported yet, view skipped")
+                continue
+            lines.append(
+                f"CREATE OR REPLACE VIEW {table} AS SELECT * FROM read_parquet('{path.resolve()}');"
             )
         return "\n".join(lines) + "\n"
 

@@ -240,3 +240,16 @@ ENTITY_REFRESH = pa.schema(
         ("last_error", pa.string()),
     ]
 )
+
+ESI_CACHE = pa.schema(
+    [
+        ("key", pa.string()),
+        ("status", pa.int32()),
+        ("body", pa.string()),
+        ("etag", pa.string()),
+        ("last_modified", pa.string()),
+        ("cache_control", pa.string()),
+        ("observed_at", TIMESTAMP),
+        ("expires_at", TIMESTAMP),
+    ]
+)

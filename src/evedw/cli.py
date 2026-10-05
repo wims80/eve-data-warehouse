@@ -3,26 +3,33 @@
 from collections.abc import Generator
 from contextlib import contextmanager
 from dataclasses import dataclass
-from datetime import date, datetime
+from datetime import UTC, date, datetime
 from pathlib import Path
-from typing import Annotated
+from typing import Annotated, Any
 
 import typer
 
 from evedw import __version__
 from evedw.config import Settings
-from evedw.domain.datasets import DATASETS, get_dataset
-from evedw.domain.registry import Trigger
+from evedw.domain.datasets import DATASETS, ENTITIES_BACKFILL, get_dataset
+from evedw.domain.registry import ImportRun, Trigger
+from evedw.domain.schemas import ENTITY_TABLES
+from evedw.jobs.entities import ExportJob, RefreshJob
 from evedw.jobs.importers import importer_for
 from evedw.jobs.runner import JobRunner, LockHeldError, WriterLock
 from evedw.jobs.sync import SyncJob
 from evedw.jobs.verify import VerifyReport, verify_dataset
 from evedw.logs import setup_logging
+from evedw.sources.esi import EsiClient, load_policy
 from evedw.sources.everef import EveRefClient
-from evedw.store import open_lake, open_registry
+from evedw.store import open_entity_store, open_lake, open_registry, open_response_cache
 from evedw.store.base import Registry
 
 app = typer.Typer(no_args_is_help=True, add_completion=False, help="EVE data warehouse.")
+entities_app = typer.Typer(no_args_is_help=True, help="Character, corporation and alliance tables.")
+esi_app = typer.Typer(no_args_is_help=True, help="ESI policy state.")
+app.add_typer(entities_app, name="entities")
+app.add_typer(esi_app, name="esi")
 
 DATE_FORMATS = ["%Y-%m-%d"]
 
@@ -58,6 +65,38 @@ def _writer(settings: Settings) -> Generator[tuple[WriterLock, Registry]]:
     finally:
         registry.close()
         lock.release()
+
+
+def _require_migrated(registry: Registry) -> None:
+    if registry.schema_version() == 0:
+        typer.echo("error: registry is not migrated; run `evedw migrate`", err=True)
+        raise typer.Exit(code=1)
+
+
+def _run(runner: JobRunner, job: str, fn: Any, params: dict[str, Any]) -> ImportRun:
+    try:
+        return runner.run(job, fn, trigger=Trigger.CLI, params=params)
+    except Exception as exc:
+        typer.echo(f"error: {exc}", err=True)
+        raise typer.Exit(code=1) from None
+
+
+def _print_run(run: ImportRun, *, objects: str = "objects imported") -> None:
+    print(
+        f"run {run.run_id} {run.status.value}: {run.objects_changed} {objects}, "
+        f"{run.rows_written} rows written"
+    )
+
+
+def _esi_client(settings: Settings) -> EsiClient:
+    return EsiClient(
+        settings.esi_base_url,
+        compatibility_date=settings.esi_compatibility_date,
+        contact=settings.esi_contact,
+        cache=open_response_cache(settings),
+        policy_path=settings.esi_policy_path,
+        daily_budget=settings.esi_daily_budget,
+    )
 
 
 @app.callback()
@@ -279,3 +318,186 @@ def views(ctx: typer.Context) -> None:
     """Print DuckDB view DDL for consumers that read the lake directly."""
     settings = _state(ctx).settings
     print(open_lake(settings).view_sql(), end="")
+
+
+# --- entities -----------------------------------------------------------------------------
+
+
+@entities_app.command("seed")
+def entities_seed(
+    ctx: typer.Context,
+    snapshot: Annotated[
+        str,
+        typer.Argument(help="Backfill snapshot date (YYYY-MM-DD) or 'latest'."),
+    ] = "latest",
+    force: Annotated[bool, typer.Option("--force", help="Re-import an imported snapshot.")] = False,
+) -> None:
+    """Import an EVE Ref character/corporation/alliance backfill into the entity tables."""
+    settings = _state(ctx).settings
+    ds = ENTITIES_BACKFILL
+    with _writer(settings) as (lock, registry):
+        _require_migrated(registry)
+        lake = open_lake(settings)
+        entities = open_entity_store(settings)
+        client = EveRefClient(settings.everef_base_url, contact=settings.esi_contact)
+        try:
+            if snapshot == "latest":
+                listed = [o.logical_date for o in client.discover(ds, []) if o.logical_date]
+                if not listed:
+                    typer.echo("error: no backfill archives listed upstream", err=True)
+                    raise typer.Exit(code=1)
+                day = max(listed)
+            else:
+                try:
+                    day = date.fromisoformat(snapshot)
+                except ValueError:
+                    typer.echo(f"error: not a date: {snapshot!r}", err=True)
+                    raise typer.Exit(code=2) from None
+            job = SyncJob(
+                dataset=ds,
+                client=client,
+                importer=importer_for(ds, lake, entities=entities),
+                date_from=day,
+                date_to=day,
+                force=force,
+                head_days=settings.head_days,
+            )
+            run = _run(
+                JobRunner(settings, registry, lock),
+                "entities:seed",
+                job,
+                {"snapshot": day, "force": force},
+            )
+            counts = {table: entities.count(table) for table in ENTITY_TABLES}
+        finally:
+            client.close()
+            entities.close()
+    _print_run(run, objects="archives imported")
+    for table, count in counts.items():
+        print(f"{table:<30} {count:>12}")
+
+
+@entities_app.command("refresh")
+def entities_refresh(
+    ctx: typer.Context,
+    budget: Annotated[
+        int | None,
+        typer.Option(
+            "--budget", help="Requests this run may send; the daily budget still applies."
+        ),
+    ] = None,
+    no_populate: Annotated[
+        bool,
+        typer.Option("--no-populate", help="Do not scan recent killmails for new entity IDs."),
+    ] = False,
+) -> None:
+    """Refresh queued entities from ESI within the request budget."""
+    settings = _state(ctx).settings
+    with _writer(settings) as (lock, registry):
+        _require_migrated(registry)
+        lake = open_lake(settings)
+        entities = open_entity_store(settings)
+        esi = _esi_client(settings)
+        try:
+            job = RefreshJob(
+                esi,
+                entities,
+                lake,
+                recent_days=settings.esi_recent_days,
+                refresh_interval=settings.esi_refresh_interval,
+                budget=budget,
+                populate=not no_populate,
+            )
+            run = _run(
+                JobRunner(settings, registry, lock),
+                "entities:refresh",
+                job,
+                {"budget": budget, "populate": not no_populate},
+            )
+            policy = esi.policy
+        finally:
+            esi.close()
+            entities.close()
+    _print_run(run, objects="entities refreshed")
+    print(
+        f"esi requests={policy.requests} cache_hits={policy.cache_hits} "
+        f"budget_used_today={policy.budget_used}"
+    )
+
+
+@entities_app.command("export")
+def entities_export(ctx: typer.Context) -> None:
+    """Write the entity tables to Parquet under the lake for consumers."""
+    settings = _state(ctx).settings
+    with _writer(settings) as (lock, registry):
+        _require_migrated(registry)
+        entities = open_entity_store(settings)
+        try:
+            run = _run(
+                JobRunner(settings, registry, lock),
+                "entities:export",
+                ExportJob(entities, settings.entities_dir),
+                {"directory": str(settings.entities_dir)},
+            )
+        finally:
+            entities.close()
+    _print_run(run, objects="files written")
+
+
+@entities_app.command("status")
+def entities_status(ctx: typer.Context) -> None:
+    """Row counts of the entity tables."""
+    settings = _state(ctx).settings
+    with _writer(settings) as (_, registry):
+        _require_migrated(registry)
+        entities = open_entity_store(settings)
+        try:
+            for table in ENTITY_TABLES:
+                print(f"{table:<30} {entities.count(table):>12}")
+        finally:
+            entities.close()
+
+
+# --- esi ----------------------------------------------------------------------------------
+
+
+@esi_app.command("status")
+def esi_status(ctx: typer.Context) -> None:
+    """Show the persisted ESI policy state: stops, cooldowns, budget, counters."""
+    settings = _state(ctx).settings
+    policy = load_policy(settings.esi_policy_path)
+    now = int(datetime.now(UTC).timestamp())
+    print(f"stopped        {policy.stopped or 'no'}")
+    blocked = policy.blocked_until - now
+    print(f"blocked        {f'{blocked}s' if blocked > 0 else 'no'}")
+    print(
+        f"budget         {policy.budget_used} of {settings.esi_daily_budget} used "
+        f"on {policy.budget_day or 'no day yet'}"
+    )
+    print(
+        f"counters       requests={policy.requests} cache_hits={policy.cache_hits} "
+        f"retries={policy.retries} pauses={policy.pauses}"
+    )
+    for route, group in sorted(policy.routes.items()):
+        bucket = policy.buckets.get(group)
+        detail = (
+            f"{bucket.remaining}/{bucket.limit} per {bucket.window}s" if bucket else "no bucket"
+        )
+        print(f"  {route:<45} {group:<12} {detail}")
+
+
+@esi_app.command("resume")
+def esi_resume(ctx: typer.Context) -> None:
+    """Clear a 403/420 stop after reviewing why it happened."""
+    settings = _state(ctx).settings
+    policy = load_policy(settings.esi_policy_path)
+    if not policy.stopped:
+        print("ESI is not stopped")
+        return
+    with _writer(settings):
+        esi = _esi_client(settings)
+        try:
+            esi.resume()
+        finally:
+            esi.close()
+    print(f"cleared stop: {policy.stopped}")

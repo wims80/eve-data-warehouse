@@ -14,6 +14,7 @@ from pathlib import Path
 from typing import Any
 
 import duckdb
+import pyarrow as pa
 
 from evedw.domain.ids import RunId, new_run_id
 from evedw.domain.registry import (
@@ -504,40 +505,55 @@ class DuckDBRegistry:
     # -- entity refresh queue ------------------------------------------------------------
 
     def refresh_push(self, entries: Iterable[RefreshEntry]) -> None:
+        items = list(entries)
+        if not items:
+            return
+        incoming = pa.table(
+            {
+                "kind": pa.array([e.kind for e in items], pa.string()),
+                "entity_id": pa.array([e.entity_id for e in items], pa.int64()),
+                "priority": pa.array([e.priority for e in items], pa.int32()),
+                "last_refreshed_at": pa.array(
+                    [_to_db(e.last_refreshed_at) for e in items], pa.timestamp("us")
+                ),
+                "next_due_at": pa.array([_to_db(e.next_due_at) for e in items], pa.timestamp("us")),
+                "etag": pa.array([e.etag for e in items], pa.string()),
+                "failures": pa.array([e.failures for e in items], pa.int32()),
+                "last_error": pa.array([e.last_error for e in items], pa.string()),
+            }
+        )
         with self._lock:
-            self._con.begin()
+            self._con.register("incoming_refresh", incoming)
             try:
-                for entry in entries:
-                    self._con.execute(
-                        f"INSERT INTO entity_refresh ({_REFRESH_COLUMNS}) "
-                        "VALUES (?, ?, ?, ?, ?, ?, ?, ?) "
-                        "ON CONFLICT (kind, entity_id) DO UPDATE SET "
-                        "priority = least(priority, excluded.priority), "
-                        "next_due_at = least(next_due_at, excluded.next_due_at)",
-                        [
-                            entry.kind,
-                            entry.entity_id,
-                            entry.priority,
-                            _to_db(entry.last_refreshed_at),
-                            _to_db(entry.next_due_at),
-                            entry.etag,
-                            entry.failures,
-                            entry.last_error,
-                        ],
-                    )
-                self._con.commit()
-            except Exception:
-                self._con.rollback()
-                raise
+                self._con.execute(
+                    f"INSERT INTO entity_refresh ({_REFRESH_COLUMNS}) "
+                    f"SELECT {_REFRESH_COLUMNS} FROM incoming_refresh "
+                    "QUALIFY row_number() OVER (PARTITION BY kind, entity_id "
+                    "ORDER BY priority, next_due_at) = 1 "
+                    "ON CONFLICT (kind, entity_id) DO UPDATE SET "
+                    "priority = least(priority, excluded.priority), "
+                    "next_due_at = least(next_due_at, excluded.next_due_at)"
+                )
+            finally:
+                self._con.unregister("incoming_refresh")
 
     def refresh_pop(self, *, limit: int, now: datetime) -> list[RefreshEntry]:
         with self._lock:
             rows = self._con.execute(
                 f"SELECT {_REFRESH_COLUMNS} FROM entity_refresh WHERE next_due_at <= ? "
-                "ORDER BY priority, next_due_at, entity_id LIMIT ?",
+                "ORDER BY priority, last_refreshed_at NULLS FIRST, next_due_at, kind, entity_id "
+                "LIMIT ?",
                 [_to_db(now), limit],
             ).fetchall()
         return [self._refresh(r) for r in rows]
+
+    def refreshed_since(self, since: datetime) -> set[tuple[str, int]]:
+        with self._lock:
+            rows = self._con.execute(
+                "SELECT kind, entity_id FROM entity_refresh WHERE last_refreshed_at >= ?",
+                [_to_db(since)],
+            ).fetchall()
+        return {(str(r[0]), int(r[1])) for r in rows}
 
     def refresh_update(self, entry: RefreshEntry) -> None:
         with self._lock:

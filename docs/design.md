@@ -81,17 +81,34 @@ Facts below were measured on 2026-10-05 against live EVE Ref data.
 ### 2.3 Character, corporation and alliance history
 
 - Bulk seed: `https://data.everef.net/characters-corporations-alliances/backfills/eve-kill-com-karbowiak-<YYYY-MM-DD>.tar.bz2`.
-  Four exist (2024-05-31, 2024-09-27, 2025-03-13, 2026-05-10, the last is
-  about 820 MB). The directory's `index.json` returns 404, so discovery
-  parses the HTML listing. Members are `characters.json`, `corporations.json`
-  and `alliances.json`, each a large JSON array. Character records carry a
-  `history` array of `{corporation_id, record_id, start_date}`; corporation
-  records carry `{alliance_id, record_id, start_date, is_deleted}`. The exact
-  field set is confirmed during milestone M3 by inspecting the archive.
-- Currency: ESI, public endpoints only. `GET /characters/{id}/`,
-  `GET /characters/{id}/corporationhistory/`, `GET /corporations/{id}/`,
-  `GET /corporations/{id}/alliancehistory/`, `GET /alliances/{id}/`,
-  `POST /universe/names/`. Refresh is driven by the IDs that appear in
+  Four exist (2024-05-31, 2024-09-27, 2025-03-13, 2026-05-10; 278 MB,
+  573 MB, 651 MB, 859 MB). The directory's `index.json` returns 404, so
+  discovery parses the HTML listing (`<tr class="data-file">` rows with the
+  link, a byte-size cell and a `<time datetime>`); the listing has size and
+  last-modified but no ETag, so the HEAD refresh of section 6 supplies it.
+- Archive layout, measured on the 2026-05-10 file: one directory containing
+  `characters.json` (10.3 GB, 20,826,709 records, 1,409,845 with a non-empty
+  `history`, 13,067,089 history events, longest history 1,120),
+  `corporations.json` (562 MB, 978,601 records, 20,329 with history, 59,014
+  events) and `alliances.json` (6.6 MB, 18,201 records). Each member is one
+  JSON array with one record per line. The exact key sets are pinned in
+  `jobs/entities.py` and summarised in section 7.3. Top-level timestamps look
+  like `2003-03-12 20:04:00+00` with optional fractions; history
+  `start_date` values are ISO `2010-11-02T20:05:00.000Z`. Corporation
+  history events have no `is_deleted`; that column is only filled from ESI.
+  `deleted` is true for 2,857,776 characters, 2,485,188 of which sit in
+  Doomheim (corporation 1000001); no corporation or alliance in the file is
+  marked deleted.
+- DuckDB reads the 10 GB array directly with `read_json(format='array')` in
+  about 15 seconds per pass as long as the query streams; a `list()`
+  aggregate over all records exhausts memory.
+- Currency: ESI, public endpoints only, pinned to compatibility date
+  2026-08-18 (the newest listed by `/meta/compatibility-dates` on
+  2026-10-05). Routes have no version prefix and no trailing slash:
+  `GET /characters/{id}`, `GET /characters/{id}/corporationhistory`,
+  `GET /corporations/{id}`, `GET /corporations/{id}/alliancehistory`,
+  `GET /alliances/{id}`, `POST /universe/names`. All return `Cache-Control`,
+  `ETag` and `Last-Modified`. Refresh is driven by the IDs that appear in
   recently imported killmails, under a daily request budget.
 - A snapshot date is an observation horizon, not an event date. Every entity
   row records `observed_at` and `source`.
@@ -139,14 +156,14 @@ src/evedw/
     archives.py        tar.bz2 and csv.bz2 readers producing NDJSON/CSV scratch files
     esi/
       client.py        httpx client, headers, compatibility date, conditional requests
-      policy.py        pacing, error limits, Retry-After, cooldown persistence
-      cache.py         persistent response cache keyed by URL
+      policy.py        pacing, error limits, Retry-After, budget; persisted as JSON
   store/
-    base.py            Protocols: Registry, Lake, EntityStore, Queries
+    base.py            Protocols: Registry, Lake, EntityStore, ResponseCache, Queries
     duckdb_lake/
       registry.py      registry tables in warehouse.duckdb
       lake.py          Parquet writer with atomic replace, view DDL
       entities.py      entity tables, upserts, export
+      cache.py         ESI response cache table
       queries/*.sql    named read queries
       migrations/*.sql registry schema versions
   jobs/
@@ -171,8 +188,9 @@ Everything lives under `EVEDW_DATA_DIR` (default `./data`).
 
 ```
 data/
-  warehouse.duckdb                 registry, run log, entity tables, views. Private to the service.
+  warehouse.duckdb                 registry, run log, entity tables, ESI response cache. Private to the service.
   writer.lock                      flock held by the single writer
+  esi/policy.json                  ESI pacing state: cooldowns, stop flag, daily budget use
   raw/
     killmails/2026/killmails-2026-10-01/<sha256>.tar.bz2
     market_history/2026/market-history-2026-10-01/<sha256>.csv.bz2
@@ -184,7 +202,6 @@ data/
     market_history/date=2026-10-01/data.parquet
     entities/characters.parquet, corporations.parquet, alliances.parquet,
              character_employment.parquet, corporation_alliance_history.parquet
-    esi/      ESI response cache (sqlite or duckdb, backend's choice)
   scratch/                          per-run extraction dirs, deleted after the run
 ```
 
@@ -217,6 +234,9 @@ Sizes measured 2026-10-05 from one live year of killmails (363 days,
 | market_history | 0.8 MB | 7 GB |
 | raw killmail archives | 3 MB | 15 GB |
 | raw market archives | 0.6 MB | 5 GB |
+| entity tables in warehouse.duckdb (2026-05-10 seed) | | 2.2 GB |
+| entity Parquet export | | 0.53 GB |
+| raw backfill archive | | 0.86 GB each |
 
 Older years have far fewer killmails per day, so the full-history numbers
 are upper bounds. Everything fits in well under 100 GB. The disk guard is a free-space floor
@@ -400,20 +420,65 @@ job:
   start_date, is_deleted, observed_at, source`. Primary key
   `(corporation_id, record_id)`.
 
-`source` is `everef_backfill:<sha256>` or `esi`. History rows are upserted by
-record ID; ESI wins over the backfill on conflict because it is newer.
+`source` is `everef_backfill:<sha256>` or `esi`. Every upsert is "newer
+observation wins": a stored row is replaced only when the incoming
+`observed_at` is not older. Backfill rows carry the record's own `updatedAt`
+(falling back to the snapshot date), ESI rows carry the request time, so ESI
+always wins over a backfill and an older backfill never overwrites a newer
+one. Primary keys are the entity id, or `(entity id, record_id)` for history.
 
-Seed job: extract the three members to scratch, read each with DuckDB
-`read_json(format='array')` and an explicit schema, keeping `history` as a
-JSON column, then unnest into the history tables. The archive is imported
-once per sha256 and recorded in the registry like any other object.
+Field mapping, pinned 2026-10-05 from the 2026-05-10 archive (full key sets
+in `jobs/entities.py`; an unlisted upstream key is logged by the seed and
+reported in its counts, never absorbed):
 
-Refresh job: pops due entries from `entity_refresh` ordered by priority and
-`next_due_at`. Priority sources: IDs seen in killmails imported in the last
-seven days get priority 1, everything else ages in by `last_refreshed_at`.
-Each entity costs one or two requests. Stops when the daily budget
-(`EVEDW_ESI_DAILY_BUDGET`, default 20,000) is spent or the queue is empty.
-Conditional requests with stored ETags make unchanged entities cheap.
+| table | backfill source | ESI source |
+| --- | --- | --- |
+| characters.deleted | `deleted` flag | `corporation_id == 1000001` (Doomheim), or a 404/410 on refresh |
+| corporations.deleted | `deleted` flag (never true in the file) | `state == "closed"`, or a 404/410 |
+| alliances.deleted | `deleted` flag | 404/410 on refresh |
+| character_employment | `history[]` of `{record_id, corporation_id, start_date}` | `/corporationhistory` |
+| corporation_alliance_history | `history[]` of `{record_id, alliance_id, start_date}`; `is_deleted` NULL | `/alliancehistory` incl. `is_deleted` |
+
+Dropped on purpose: descriptions, genders, races, bloodlines, home stations,
+shares, tax rates, URLs, creator ids, `last_active`, `createdAt`,
+`achievement_score`, titles. They are not history and consumers that want
+them can call ESI.
+
+Seed job (`evedw entities seed [date|latest]`): the archive is a registry
+object of dataset `entities_backfill`, discovered from the HTML listing,
+fetched and retained like any other object, and imported by streaming the
+three members out of the tar into scratch, then reading each with DuckDB
+`read_json(format='array')` and explicit columns. Entities and history are
+two passes over the same file, streamed into the store in batches of 250,000
+rows so the 10 GB character file never has to fit in memory. The object's
+`observed_count` is the number of entity records (characters, corporations
+and alliances). Re-running the seed on an imported snapshot does nothing;
+`--force` re-imports it, which is a no-op for the data because of the upsert
+rule.
+
+Refresh job (`evedw entities refresh [--budget N]`):
+
+1. Populate: distinct character, corporation and alliance ids from killmail
+   and attacker partitions of the last `EVEDW_ESI_RECENT_DAYS` (7) days are
+   pushed with priority 1 and due now, except ids refreshed within the last
+   day, whose ESI data is still as fresh as a request would return.
+2. Drain: pop due entries ordered by priority, never-refreshed first, then
+   longest ago refreshed, then earliest due. A character or corporation
+   costs up to two requests (entity plus history), an alliance one. The
+   loop stops before an entity that would exceed the daily budget
+   (`EVEDW_ESI_DAILY_BUDGET`, default 20,000) or the run's `--budget`.
+3. Per entity: conditional requests through the client; a 304 or a cache
+   hit writes nothing. Success sets `last_refreshed_at`, priority 2 and
+   `next_due_at = max(cache expiry, now + EVEDW_ESI_REFRESH_INTERVAL)`
+   (30 days). A 404/410 marks the stored row deleted with `source = 'esi'`
+   and parks the entry for a year. Other 4xx park the entry for a year with
+   the status recorded. Transient failures back off by hours, doubling per
+   failure up to a day. A 403 or 420 raises out of the job, which records
+   the run as failed; nothing else talks to ESI until `evedw esi resume`.
+
+Export job (`evedw entities export`): `COPY` each table to
+`lake/entities/<table>.parquet.tmp`, fsync, replace. `evedw views` adds a
+view per exported file.
 
 ## 8. Jobs and scheduling
 
@@ -463,19 +528,23 @@ entity lookups by ID. Analytical queries belong in consumers reading Parquet.
 
 - `Registry`: `upsert_objects`, `mark`, `objects(status, dataset)`,
   `add_revision`, `promote(object, revision)`, `start_run`, `finish_run`,
-  `runs`, `refresh_queue_pop`, `refresh_queue_push`.
+  `runs`, `refresh_push`, `refresh_pop`, `refresh_update`,
+  `refreshed_since`.
 - `Lake`: `write_partition(table, partition, arrow_table, metadata)`,
-  `partitions(table)`, `read(table, date_from, date_to)`.
-- `EntityStore`: `upsert_characters`, `upsert_corporations`,
-  `upsert_alliances`, `upsert_employment`, `upsert_alliance_history`,
-  `export_parquet(dir)`, `lookup(kind, ids)`.
+  `partitions(table)`, `read(table, date_from, date_to)`, `view_sql()`.
+- `EntityStore`: `upsert(table, arrow_table)` with the newer-observation
+  rule of section 7.3, `lookup(table, ids)`, `count(table)`,
+  `export_parquet(dir)`.
+- `ResponseCache`: `get(key)`, `put(entry)`, `delete(key)`; the ESI client's
+  body and validator store. In DuckDB it is the `esi_cache` table.
 - `Queries`: `run(name, params) -> pyarrow.Table`.
 
 The DuckDB backend is the first implementation. Facts live in Parquet
 regardless of backend, so a second backend (ClickHouse, Postgres with ADBC)
-only has to implement registry, entities and named queries, and can leave
-`Lake` as the shared Parquet implementation or replace it. The boundary is
-exercised by a contract test suite that any backend must pass.
+only has to implement registry, entities, response cache and named queries,
+and can leave `Lake` as the shared Parquet implementation or replace it. The
+boundary is exercised by a contract test suite that any backend must pass
+(`tests/store/test_*_contract.py`).
 
 What is not abstracted: the SQL inside named queries and inside the killmail
 normaliser. These are per-backend files by design.
@@ -485,23 +554,35 @@ normaliser. These are per-backend files by design.
 Binding for every ESI request made by this project, including ad hoc scripts.
 
 - One request in flight, at least one second between requests, five attempts
-  for transient failures with exponential backoff and jitter.
-- Send `User-Agent` with project name, version, repository URL and
-  `EVEDW_ESI_CONTACT`. Send the `X-Compatibility-Date` header required by
-  current ESI and pin its value in `config.py`. Check the live endpoint
-  specification before adding an endpoint.
-- Honour `Cache-Control`, `Expires`, `ETag` and `Last-Modified`. Store
-  bodies and validators; a 304 keeps the cached body. Never request an
-  entity before its cached expiry.
-- Read both the per-bucket rate-limit headers and the legacy
-  `X-ESI-Error-Limit-Remain` and `-Reset` headers. Pause early when
-  allowances run low. Honour `Retry-After`. Persist cooldowns so a restart
-  does not reset them.
-- A 420 or a 403 stops all ESI work until an operator clears it. Permanent
-  errors (404, 410, 422) are recorded on the entity and not retried.
-- `POST /universe/names/` batches at most 1,000 unique IDs. A rejected batch
-  is recorded, not split and retried.
-- Tests mock ESI. Live calls happen only in explicitly marked manual tests.
+  for transient failures (transport errors, 408, 429, 5xx) with exponential
+  backoff and jitter. Every request goes through `EsiClient._request`.
+- Send `User-Agent` with project name, version and `EVEDW_ESI_CONTACT`.
+  Send `X-Compatibility-Date`, pinned in `config.py` (2026-08-18, verified
+  2026-10-05 against `/meta/openapi.json?compatibility_date=`). Check the
+  live specification before adding an endpoint or moving the date.
+- Honour `Cache-Control`, `Expires`, `Age`, `Date`, `ETag` and
+  `Last-Modified`. Bodies and validators live in the store's
+  `ResponseCache`, keyed by base URL, method, route and body. A fresh entry
+  is served without a request; an expired one is revalidated with
+  `If-None-Match` or `If-Modified-Since`, and a 304 keeps the cached body and
+  takes the new expiry. `no-store` responses are never kept.
+- Read both the per-bucket `X-RateLimit-Group/Limit/Remaining` headers and
+  the legacy `X-ESI-Error-Limit-Remain/Reset` headers. Reserve bucket units
+  before sending, pause a full window when a bucket is near exhaustion,
+  pause a minute on a malformed or negative legacy header, an hour on an
+  unparseable limit. Honour `Retry-After` as seconds or a date. The whole
+  state is written to `data/esi/policy.json` after every change, so a
+  restart does not reset a cooldown.
+- A 420 or a 403 sets `stopped` with the reason; every later request raises
+  until an operator runs `evedw esi resume`. Other 4xx are permanent for
+  that request: raised to the caller, recorded on the entity, not retried.
+- A daily request budget (`EVEDW_ESI_DAILY_BUDGET`) counts requests sent,
+  including revalidations and retries, not cache hits; it is kept in the
+  policy file and resets by UTC day.
+- `POST /universe/names` batches at most 1,000 distinct positive IDs. A
+  rejected batch is an error for the caller, not split and retried.
+- Tests mock ESI (`tests/fake_esi.py`). Live calls happen only in explicitly
+  marked manual tests or operator-run commands.
 
 ## 12. Verification
 
@@ -521,9 +602,11 @@ Output is a text table or JSON. It never writes.
 
 `pydantic-settings`, prefix `EVEDW_`, loaded from environment and `.env`.
 Keys: `DATA_DIR`, `BIND`, `MIN_FREE_GB`, `ESI_CONTACT`, `ESI_DAILY_BUDGET`,
-`ESI_COMPATIBILITY_DATE`, `EVEREF_BASE_URL`, `ESI_BASE_URL`,
-`SYNC_INTERVAL_KILLMAILS`, `SYNC_INTERVAL_MARKET`, `LOG_LEVEL`. Base URLs
-are overridable so tests can point at a local fixture server.
+`ESI_COMPATIBILITY_DATE`, `ESI_REFRESH_INTERVAL`, `ESI_RECENT_DAYS`,
+`EVEREF_BASE_URL`, `ESI_BASE_URL`, `SYNC_INTERVAL_KILLMAILS`,
+`SYNC_INTERVAL_MARKET`, `SWEEP_INTERVAL`, `HEAD_DAYS`, `LOG_LEVEL`.
+Intervals are seconds in the environment. Base URLs are overridable so tests
+can point at a local fixture server.
 
 ## 14. Tooling
 

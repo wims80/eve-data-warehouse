@@ -262,6 +262,33 @@ def test_refresh_queue_merges_and_orders(registry: Registry) -> None:
     assert [e.entity_id for e in registry.refresh_pop(limit=10, now=soon)] == [3, 2]
 
 
+def test_refresh_queue_orders_never_refreshed_and_stalest_first(registry: Registry) -> None:
+    registry.refresh_push(
+        [
+            RefreshEntry("character", 1, priority=1, next_due_at=NOW),
+            RefreshEntry("character", 2, priority=1, next_due_at=NOW),
+            RefreshEntry("character", 3, priority=1, next_due_at=NOW),
+        ]
+    )
+    registry.refresh_update(
+        RefreshEntry(
+            "character", 1, priority=1, next_due_at=NOW, last_refreshed_at=NOW - timedelta(days=2)
+        )
+    )
+    registry.refresh_update(
+        RefreshEntry(
+            "character", 3, priority=1, next_due_at=NOW, last_refreshed_at=NOW - timedelta(days=9)
+        )
+    )
+    assert [e.entity_id for e in registry.refresh_pop(limit=10, now=NOW)] == [2, 3, 1]
+    assert registry.refreshed_since(NOW - timedelta(days=3)) == {("character", 1)}
+    assert registry.refreshed_since(NOW - timedelta(days=30)) == {
+        ("character", 1),
+        ("character", 3),
+    }
+    assert registry.refreshed_since(NOW) == set()
+
+
 def test_dataset_summaries(registry: Registry) -> None:
     assert registry.dataset_summaries() == []
     k1, k2 = "2026/killmails-2026-10-01.tar.bz2", "2026/killmails-2026-10-02.tar.bz2"

@@ -158,3 +158,55 @@ def test_gives_up_after_attempts(
             url, into_dir=tmp_path, suffix=".csv.bz2", expected_size=None, expected_etag=None
         )
     assert not any(tmp_path.iterdir())
+
+
+BACKFILL_HTML = (
+    '<html><body><div class="container"><pre><table class="table table-sm">'
+    '<thead><th>File</th><th class="text-right">Size</th><th class="text-right">Size (bytes)</th>'
+    '<th class="text-right">Last modified</th></thead><tbody>'
+    '<tr class="data-file"><td><a class="data-file-url" '
+    'href="/characters-corporations-alliances/backfills/eve-kill-com-karbowiak-2025-03-13.tar.bz2">'
+    "eve-kill-com-karbowiak-2025-03-13.tar.bz2</a></td>"
+    '<td class="data-file-size-formatted text-right">620.47 MiB</td>'
+    '<td class="data-file-size-bytes text-right">650,606,182</td>'
+    '<td class="data-file-last-modified text-right">'
+    '<time datetime="2025-03-13T00:00:00Z">2025-03-13 00:00:00 UTC</time></td></tr>'
+    '<tr class="data-file"><td><a class="data-file-url" '
+    'href="/characters-corporations-alliances/backfills/eve-kill-com-karbowiak-2026-05-10.tar.bz2">'
+    "eve-kill-com-karbowiak-2026-05-10.tar.bz2</a></td>"
+    '<td class="data-file-size-formatted text-right">819.18 MiB</td>'
+    '<td class="data-file-size-bytes text-right">858,967,779</td>'
+    '<td class="data-file-last-modified text-right">'
+    '<time datetime="2026-05-10T00:00:00Z">2026-05-10 00:00:00 UTC</time></td></tr>'
+    "</tbody></table></pre></div></body></html>"
+)
+
+
+def test_parse_html_listing() -> None:
+    from evedw.sources.everef import parse_html_listing
+
+    base = "https://everef.test/characters-corporations-alliances/backfills/"
+    entries = parse_html_listing(BACKFILL_HTML, base)
+    assert [e.name for e in entries] == [
+        "eve-kill-com-karbowiak-2025-03-13.tar.bz2",
+        "eve-kill-com-karbowiak-2026-05-10.tar.bz2",
+    ]
+    assert entries[1].size == 858_967_779 and entries[1].etag is None
+    assert entries[1].url == base + "eve-kill-com-karbowiak-2026-05-10.tar.bz2"
+    assert entries[1].last_modified == datetime(2026, 5, 10, tzinfo=UTC)
+
+
+def test_discover_listing_dataset_tries_index_then_html(
+    router: respx.Router, client: EveRefClient
+) -> None:
+    from evedw.domain.datasets import ENTITIES_BACKFILL
+
+    base = f"{BASE_URL}/characters-corporations-alliances/backfills/"
+    router.get(base + "index.json").mock(return_value=httpx.Response(404))
+    router.get(base).mock(return_value=httpx.Response(200, text=BACKFILL_HTML))
+    found = client.discover(ENTITIES_BACKFILL, [])
+    assert [(o.object_key, o.logical_date, o.size) for o in found] == [
+        ("2025/eve-kill-com-karbowiak-2025-03-13.tar.bz2", date(2025, 3, 13), 650_606_182),
+        ("2026/eve-kill-com-karbowiak-2026-05-10.tar.bz2", date(2026, 5, 10), 858_967_779),
+    ]
+    assert all(o.expected_count is None and o.etag is None for o in found)

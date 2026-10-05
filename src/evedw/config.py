@@ -17,8 +17,13 @@ class Settings(BaseSettings):
 
     esi_contact: str | None = None
     esi_daily_budget: int = 20_000
-    # Verify against https://developers.eveonline.com/api-explorer before milestone M3.
-    esi_compatibility_date: str = "2025-08-26"
+    # Latest date listed by https://esi.evetech.net/meta/compatibility-dates on 2026-10-05.
+    # Re-check the endpoint specification when changing it (design §11).
+    esi_compatibility_date: str = "2026-08-18"
+    esi_refresh_interval: timedelta = Field(default=timedelta(days=30))
+    """How long a refreshed entity stays off the queue unless a killmail brings it back."""
+    esi_recent_days: int = 7
+    """Killmail days scanned for entity IDs when the refresh queue is populated."""
 
     everef_base_url: str = "https://data.everef.net"
     esi_base_url: str = "https://esi.evetech.net"
@@ -32,7 +37,11 @@ class Settings(BaseSettings):
     log_level: str = "INFO"
 
     @field_validator(
-        "sync_interval_killmails", "sync_interval_market", "sweep_interval", mode="before"
+        "sync_interval_killmails",
+        "sync_interval_market",
+        "sweep_interval",
+        "esi_refresh_interval",
+        mode="before",
     )
     @classmethod
     def _seconds_as_timedelta(cls, value: object) -> object:
@@ -61,6 +70,25 @@ class Settings(BaseSettings):
     def scratch_dir(self) -> Path:
         return self.data_dir / "scratch"
 
+    @property
+    def esi_dir(self) -> Path:
+        return self.data_dir / "esi"
+
+    @property
+    def esi_policy_path(self) -> Path:
+        return self.esi_dir / "policy.json"
+
+    @property
+    def entities_dir(self) -> Path:
+        """Parquet exports of the entity tables, for consumers."""
+        return self.lake_dir / "entities"
+
     def ensure_dirs(self) -> None:
-        for directory in (self.data_dir, self.raw_dir, self.lake_dir, self.scratch_dir):
+        for directory in (
+            self.data_dir,
+            self.raw_dir,
+            self.lake_dir,
+            self.scratch_dir,
+            self.esi_dir,
+        ):
             directory.mkdir(parents=True, exist_ok=True)

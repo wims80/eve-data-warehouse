@@ -31,7 +31,11 @@ downward.
 - `parser_version` lives in `domain/datasets.py`. Bump it whenever a
   normaliser's output changes; this is what triggers re-import.
 - Schema is explicit. Never let DuckDB infer the JSON or CSV schema in a job.
-- Keep `observed_at` and `source` on every entity row.
+- Keep `observed_at` and `source` on every entity row. An entity upsert
+  replaces a row only when the incoming observation is not older, so a
+  backfill can never overwrite newer ESI data.
+- Entity field sets are pinned in `jobs/entities.py`; the seed reports
+  unknown upstream keys instead of absorbing them.
 
 ## ESI
 
