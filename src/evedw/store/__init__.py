@@ -8,6 +8,8 @@ from evedw.store.base import (
     Lake,
     PartitionInfo,
     Queries,
+    QueryInfo,
+    QueryParam,
     Registry,
     ResponseCache,
 )
@@ -18,10 +20,13 @@ __all__ = [
     "Lake",
     "PartitionInfo",
     "Queries",
+    "QueryInfo",
+    "QueryParam",
     "Registry",
     "ResponseCache",
     "open_entity_store",
     "open_lake",
+    "open_queries",
     "open_registry",
     "open_response_cache",
 ]
@@ -63,4 +68,17 @@ def open_response_cache(settings: Settings) -> ResponseCache:
         from evedw.store.duckdb_lake.cache import DuckDBResponseCache
 
         return DuckDBResponseCache(settings.warehouse_path)
+    raise _unknown(settings)
+
+
+def open_queries(settings: Settings, lake: Lake) -> Queries:
+    """Named read queries over the lake and the live entity tables. Requires a migrated
+    registry; the lake must come from ``open_lake`` of the same backend."""
+    if settings.store_backend == "duckdb":
+        from evedw.store.duckdb_lake.lake import ParquetLake
+        from evedw.store.duckdb_lake.queries import DuckDBQueries
+
+        if not isinstance(lake, ParquetLake):
+            raise TypeError("the DuckDB query backend needs the Parquet lake")
+        return DuckDBQueries(settings.warehouse_path, lake)
     raise _unknown(settings)

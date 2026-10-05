@@ -439,13 +439,36 @@ class DuckDBRegistry:
     def start_run(
         self, job: str, trigger: Trigger, params: Mapping[str, Any], *, now: datetime
     ) -> ImportRun:
+        return self._insert_run(job, trigger, params, now=now, status=RunStatus.RUNNING)
+
+    def queue_run(
+        self, job: str, trigger: Trigger, params: Mapping[str, Any], *, now: datetime
+    ) -> ImportRun:
+        return self._insert_run(job, trigger, params, now=now, status=RunStatus.QUEUED)
+
+    def begin_run(self, run_id: RunId, *, now: datetime) -> None:
+        with self._lock:
+            self._con.execute(
+                "UPDATE import_run SET status = ?, started_at = ? WHERE run_id = ? AND status = ?",
+                [RunStatus.RUNNING.value, _to_db(now), run_id, RunStatus.QUEUED.value],
+            )
+
+    def _insert_run(
+        self,
+        job: str,
+        trigger: Trigger,
+        params: Mapping[str, Any],
+        *,
+        now: datetime,
+        status: RunStatus,
+    ) -> ImportRun:
         run_id = new_run_id()
         params_json = json.dumps(dict(params), sort_keys=True, default=str)
         with self._lock:
             self._con.execute(
                 f"INSERT INTO import_run ({_RUN_COLUMNS}) "
                 "VALUES (?, ?, ?, ?, NULL, ?, ?, 0, 0, NULL)",
-                [run_id, job, trigger.value, _to_db(now), RunStatus.RUNNING.value, params_json],
+                [run_id, job, trigger.value, _to_db(now), status.value, params_json],
             )
         run = self.get_run(run_id)
         if run is None:

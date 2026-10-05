@@ -483,7 +483,7 @@ class RefreshJob:
     def __call__(self, ctx: RunContext) -> JobOutcome:
         if self.populate:
             self.populate_queue(ctx.registry)
-        return self.drain(ctx.registry)
+        return self.drain(ctx.registry, cancel=ctx.check_cancelled)
 
     def populate_queue(self, registry: Registry) -> int:
         """Queue entities seen in recent killmails with priority 1, except those refreshed
@@ -509,7 +509,8 @@ class RefreshJob:
         )
         return len(entries)
 
-    def drain(self, registry: Registry) -> JobOutcome:
+    def drain(self, registry: Registry, *, cancel: Callable[[], None] = lambda: None) -> JobOutcome:
+        """``cancel`` is called before every entity; it raises to stop the drain."""
         refreshed = 0
         rows = 0
         sent_before = self.esi.policy.requests
@@ -519,6 +520,7 @@ class RefreshJob:
                 log.info("refresh queue drained; %d entities refreshed", refreshed)
                 return JobOutcome(objects_changed=refreshed, rows_written=rows)
             for entry in due:
+                cancel()
                 allowance = self.esi.budget_remaining()
                 if self.budget is not None:
                     allowance = min(

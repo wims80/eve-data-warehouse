@@ -13,4 +13,9 @@ uv sync
 cp .env.example .env
 uv run evedw migrate
 uv run evedw status
+uv run evedw serve        # API on 127.0.0.1:8470 plus the scheduler
 ```
+
+While `evedw serve` runs, `evedw sync`, `evedw verify` and the `evedw entities`
+commands send their job to the service and follow the run. Consumers are
+described in `docs/consumers.md`.

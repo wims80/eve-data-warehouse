@@ -23,7 +23,7 @@ from evedw.domain.registry import (
     SourceObject,
     SourceRevision,
 )
-from evedw.jobs.runner import JobOutcome, RunContext
+from evedw.jobs.runner import JobCancelled, JobOutcome, RunContext
 from evedw.logs import log_context
 from evedw.sources.everef import EveRefClient
 from evedw.store.base import PartitionInfo
@@ -216,11 +216,12 @@ class SyncJob:
         failures: list[str] = []
         try:
             for obj in pending:
+                ctx.check_cancelled()
                 with log_context(object_key=obj.object_key):
                     try:
                         rows += self._process(ctx, obj, scratch)
                         imported += 1
-                    except KeyboardInterrupt:
+                    except (KeyboardInterrupt, JobCancelled):
                         raise
                     except Exception as exc:
                         log.exception("object failed")
@@ -268,7 +269,7 @@ class SyncJob:
             else:
                 log.info("imported revision %d: %d rows", revision.revision, result.rows)
             return result.rows
-        except KeyboardInterrupt:
+        except (KeyboardInterrupt, JobCancelled):
             registry.mark(
                 self.dataset.name, obj.object_key, ObjectStatus.FAILED, error="interrupted"
             )

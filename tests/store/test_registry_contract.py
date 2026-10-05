@@ -310,3 +310,23 @@ def test_dataset_summaries(registry: Registry) -> None:
 def test_naive_datetimes_are_rejected(registry: Registry) -> None:
     with pytest.raises(ValueError, match="naive"):
         registry.upsert_objects([discovered()], now=datetime(2026, 1, 1))  # noqa: DTZ001
+
+
+def test_queued_run_becomes_running_when_begun(registry: Registry) -> None:
+    queued = registry.queue_run("entities:export", Trigger.MANUAL, {}, now=NOW)
+    assert queued.status is RunStatus.QUEUED and not queued.status.finished
+    assert queued.started_at == NOW
+
+    registry.begin_run(queued.run_id, now=NOW + timedelta(minutes=5))
+    running = registry.get_run(queued.run_id)
+    assert running is not None
+    assert running.status is RunStatus.RUNNING
+    assert running.started_at == NOW + timedelta(minutes=5)
+
+    # begin_run is idempotent and never touches a run that already left the queue.
+    registry.begin_run(queued.run_id, now=NOW + timedelta(minutes=9))
+    registry.finish_run(queued.run_id, RunStatus.SUCCEEDED, now=NOW + timedelta(minutes=10))
+    finished = registry.get_run(queued.run_id)
+    assert finished is not None
+    assert finished.started_at == NOW + timedelta(minutes=5)
+    assert finished.status.finished

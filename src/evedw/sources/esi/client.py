@@ -113,6 +113,17 @@ def load_policy(path: Path) -> Policy:
     return Policy.from_dict(raw)  # pyright: ignore[reportUnknownArgumentType]
 
 
+def save_policy(path: Path, policy: Policy) -> None:
+    """Write the policy state atomically."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = path.with_suffix(".json.tmp")
+    with tmp.open("w", encoding="utf-8") as fh:
+        json.dump(policy.to_dict(), fh, indent=1, sort_keys=True)
+        fh.flush()
+        os.fsync(fh.fileno())
+    tmp.replace(path)
+
+
 class EsiClient:
     def __init__(
         self,
@@ -165,13 +176,7 @@ class EsiClient:
         return load_policy(self._policy_path)
 
     def _save_policy(self) -> None:
-        self._policy_path.parent.mkdir(parents=True, exist_ok=True)
-        tmp = self._policy_path.with_suffix(".json.tmp")
-        with tmp.open("w", encoding="utf-8") as fh:
-            json.dump(self._policy.to_dict(), fh, indent=1, sort_keys=True)
-            fh.flush()
-            os.fsync(fh.fileno())
-        tmp.replace(self._policy_path)
+        save_policy(self._policy_path, self._policy)
 
     def _now(self) -> int:
         return int(self._clock())

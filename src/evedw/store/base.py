@@ -113,7 +113,20 @@ class Registry(Protocol):
 
     def start_run(
         self, job: str, trigger: Trigger, params: Mapping[str, Any], *, now: datetime
-    ) -> ImportRun: ...
+    ) -> ImportRun:
+        """Insert a run in status ``running``."""
+        ...
+
+    def queue_run(
+        self, job: str, trigger: Trigger, params: Mapping[str, Any], *, now: datetime
+    ) -> ImportRun:
+        """Insert a run in status ``queued``; the service hands its id out before the job
+        starts. ``begin_run`` moves it to ``running``."""
+        ...
+
+    def begin_run(self, run_id: RunId, *, now: datetime) -> None:
+        """Queued -> running, with ``started_at`` reset to ``now``."""
+        ...
 
     def finish_run(
         self,
@@ -235,7 +248,34 @@ class ResponseCache(Protocol):
     def close(self) -> None: ...
 
 
+@dataclass(frozen=True, slots=True)
+class QueryParam:
+    name: str
+    kind: str
+    """``date``, ``int``, ``ids`` (list of ints) or ``str``."""
+    required: bool
+
+
+@dataclass(frozen=True, slots=True)
+class QueryInfo:
+    name: str
+    description: str
+    params: tuple[QueryParam, ...]
+
+
 class Queries(Protocol):
+    """Named read queries from ``store/<backend>/queries/*.sql`` (design §9)."""
+
     def names(self) -> list[str]: ...
 
-    def run(self, name: str, params: Mapping[str, Any]) -> pa.Table: ...
+    def describe(self, name: str) -> QueryInfo:
+        """Raises ``KeyError`` for an unknown name."""
+        ...
+
+    def run(self, name: str, params: Mapping[str, str]) -> pa.Table:
+        """Run a named query. ``params`` are raw strings as they arrive on a query string;
+        the backend converts them by the declared kinds and raises ``ValueError`` on a
+        missing required parameter or a value that does not parse."""
+        ...
+
+    def close(self) -> None: ...

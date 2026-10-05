@@ -60,3 +60,56 @@ def test_runner_records_failure_and_reraises(
     assert run.status is RunStatus.FAILED
     assert run.error == "ValueError: boom"
     assert any("run failed" in r.getMessage() for r in caplog.records)
+
+
+def test_lock_holder_reports_service_url(settings: Settings) -> None:
+    lock = WriterLock(settings.lock_path)
+    assert lock.holder() is None
+    lock.acquire(service_url="http://127.0.0.1:8470")
+    try:
+        other = WriterLock(settings.lock_path)
+        holder = other.holder()
+        assert holder is not None
+        assert holder.service_url == "http://127.0.0.1:8470"
+        with pytest.raises(LockHeldError, match=r"service at http://127.0.0.1:8470") as info:
+            other.acquire()
+        assert info.value.holder.pid is not None
+    finally:
+        lock.release()
+    assert WriterLock(settings.lock_path).holder() is None
+    with WriterLock(settings.lock_path) as plain:
+        assert plain.holder() is not None and plain.holder().service_url is None  # type: ignore[union-attr]
+        held = WriterLock(settings.lock_path).holder()
+        assert held is not None and held.service_url is None
+
+
+def test_runner_continues_a_queued_run_and_records_cancellation(
+    settings: Settings, registry: Registry
+) -> None:
+    from datetime import UTC, datetime
+    from threading import Event
+
+    from evedw.jobs.runner import JobCancelled
+
+    queued = registry.queue_run(
+        "sync:test", Trigger.MANUAL, {"force": False}, now=datetime.now(UTC)
+    )
+    cancel = Event()
+
+    def job(ctx: RunContext) -> JobOutcome:
+        assert ctx.run_id == queued.run_id
+        ctx.check_cancelled()
+        cancel.set()
+        ctx.check_cancelled()
+        raise AssertionError("unreachable")
+
+    with WriterLock(settings.lock_path) as lock:
+        runner = JobRunner(settings, registry, lock)
+        with pytest.raises(JobCancelled):
+            runner.run(
+                "sync:test", job, trigger=Trigger.MANUAL, run_id=queued.run_id, cancel=cancel
+            )
+    (run,) = registry.runs()
+    assert run.run_id == queued.run_id
+    assert run.status is RunStatus.CANCELLED and run.error == "cancelled"
+    assert run.params == {"force": False}

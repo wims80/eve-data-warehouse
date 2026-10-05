@@ -31,6 +31,12 @@ class Settings(BaseSettings):
     sync_interval_killmails: timedelta = Field(default=timedelta(hours=6))
     sync_interval_market: timedelta = Field(default=timedelta(hours=6))
     sweep_interval: timedelta = Field(default=timedelta(days=7))
+    refresh_interval: timedelta = Field(default=timedelta(minutes=5))
+    """Pause between scheduled ``entities:refresh`` slices."""
+    refresh_slice: int = 1_500
+    """Requests one scheduled refresh slice may send before yielding to other jobs."""
+    export_interval: timedelta = Field(default=timedelta(days=1))
+    verify_interval: timedelta = Field(default=timedelta(days=7))
     head_days: int = 120
     """Days back from today whose file headers are re-checked on every sync."""
 
@@ -40,6 +46,9 @@ class Settings(BaseSettings):
         "sync_interval_killmails",
         "sync_interval_market",
         "sweep_interval",
+        "refresh_interval",
+        "export_interval",
+        "verify_interval",
         "esi_refresh_interval",
         mode="before",
     )
@@ -49,6 +58,21 @@ class Settings(BaseSettings):
         if isinstance(value, str) and value.strip().isdigit():
             return int(value)
         return value
+
+    @property
+    def service_url(self) -> str:
+        """Where ``evedw serve`` listens and where a CLI sends triggers."""
+        return f"http://{self.bind}"
+
+    @property
+    def bind_host(self) -> str:
+        host, _, _ = self.bind.rpartition(":")
+        return host or "127.0.0.1"
+
+    @property
+    def bind_port(self) -> int:
+        _, _, port = self.bind.rpartition(":")
+        return int(port) if port.isdigit() else 8470
 
     @property
     def warehouse_path(self) -> Path:

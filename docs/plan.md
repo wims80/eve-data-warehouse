@@ -1,6 +1,6 @@
 # Implementation plan
 
-Status: M0 to M3 complete (2026-10-05). Next: M4.
+Status: M0 to M4 complete (2026-10-05). Next: M5.
 
 Milestones are ordered so that each one leaves a working, testable system.
 Do not start a milestone before the previous one's acceptance checks pass.
@@ -141,6 +141,21 @@ Acceptance: service runs for 24 hours unattended, run log shows the scheduled
 syncs, a CLI trigger while it runs returns a run id and shows up in
 `/runs`. A sample consumer script in `docs/consumers.md` pulls a date range
 as Arrow and reads the lake directly with DuckDB.
+
+Outcome (2026-10-05): every trigger path goes through `jobs/catalog.py`, so
+the CLI,`POST /jobs` and the scheduler build identical jobs. The service
+queues runs (new `queued` status) and executes them one at a time in a
+worker thread; a trigger returns its run id at once. The lock file names the
+service, and the CLI reads it to decide between HTTP and in-process. The
+first live start seeded the schedule from the CLI runs in the log, skipped
+`entities:refresh` because `EVEDW_ESI_CONTACT` is unset, and immediately
+started the scheduled `sync:market_history` with no date range, which
+HEAD-checked all 8,403 upstream days and marked 8,126 of them `new`: the
+scheduled syncs do the full backfill (M5) the moment the service runs. A
+`SIGTERM` during that discovery stopped the service in four seconds with the
+run recorded `cancelled` and the queued CLI trigger cancelled too. The
+24-hour unattended run is left for M5, together with the backfill it
+implies.
 
 ## M5. Full backfill and hardening
 

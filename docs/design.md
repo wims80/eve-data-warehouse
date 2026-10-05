@@ -164,10 +164,12 @@ src/evedw/
       lake.py          Parquet writer with atomic replace, view DDL
       entities.py      entity tables, upserts, export
       cache.py         ESI response cache table
+      queries.py       named query runner: parses the query headers, binds parameters
       queries/*.sql    named read queries
       migrations/*.sql registry schema versions
   jobs/
     runner.py          writer lock, run log, cancellation, trigger source
+    catalog.py         job names, parameter validation, builds a job from name + params
     scheduler.py       asyncio interval scheduler
     sync.py            discover + fetch + import per dataset, newest first
     killmails.py       NDJSON -> normalised tables
@@ -175,8 +177,12 @@ src/evedw/
     entities.py        seed from backfill, ESI refresh, Parquet export
     verify.py          counts, file integrity, registry consistency
   service/
-    app.py             FastAPI factory
-    routes/            datasets, jobs, runs, query, lake
+    app.py             FastAPI factory and lifespan
+    state.py           what the service owns; routes reach it through the request
+    worker.py          single job worker: queued runs, one at a time, cancel on stop
+    models.py          response bodies, shared with the client
+    client.py          HTTP client the CLI uses when a service holds the lock
+    routes/            health, datasets, jobs, runs, lake, query
   cli.py               typer entry point `evedw`
 tests/
   fixtures/            one small real day of each dataset, trimmed
@@ -279,8 +285,8 @@ operations, not SQL. Columns below are the logical model.
 
 | column | notes |
 | --- | --- |
-| run_id, job, trigger (`schedule`, `manual`, `cli`) | |
-| started_at, finished_at, status | |
+| run_id, job, trigger (`schedule`, `manual`, `cli`) | `manual` is an HTTP trigger, `cli` an in-process run |
+| started_at, finished_at, status | `queued`, `running`, `succeeded`, `failed`, `cancelled`. The service inserts a run as `queued` so a trigger can return its id before the writer is free; `started_at` is reset when it starts. |
 | params_json | |
 | objects_changed, rows_written | |
 | error | |
@@ -491,15 +497,45 @@ view per exported file.
 | `entities:export` | daily | write entity Parquet snapshots |
 | `verify` | weekly | read-only consistency report |
 
-The scheduler is a small asyncio loop owned by the service: each job has an
-interval and a next-due time, jobs never overlap with each other because the
-runner serialises writers, and a failed run reschedules at the normal
-interval with the error in the run log. No third-party scheduler.
+The scheduler is a small asyncio loop owned by the service: each entry has a
+job name, parameters, an interval and a next-due time. Entries never overlap
+because every run, scheduled or triggered, goes through the service's single
+job worker, which executes one run at a time in a thread. An entry's next due
+time is computed when its run finishes, so the cadence is measured from the
+end of the previous run and a slow run never queues itself twice. A failed
+run reschedules at the normal interval with the error in the run log. At
+startup the next-due times are seeded from the run log: the last run of the
+same job with the same parameters counts whatever its trigger, so a manual
+sync pushes the next scheduled one back a full interval, and a restart does
+not reset a weekly job. An entry with no recorded run is due immediately,
+except the sweeps and `verify`, which wait one interval. No third-party
+scheduler.
+
+`entities:refresh` is "continuous" as slices: every `EVEDW_REFRESH_INTERVAL`
+(5 min) a refresh run may send at most `EVEDW_REFRESH_SLICE` (1,500) requests,
+about 25 minutes at one request a second, then yields so a sync is never
+blocked for hours by a long drain. It is not scheduled at all while
+`EVEDW_ESI_CONTACT` is unset, because ESI asks for contact details in the
+User-Agent; the service logs a warning instead. `entities:export` runs every
+`EVEDW_EXPORT_INTERVAL` (daily) and `verify` every `EVEDW_VERIFY_INTERVAL`
+(weekly) as a job: issues are logged and the run is recorded as failed with
+their count and kinds, so drift shows up in the run log.
+
+The scheduled syncs carry no date range, so the first service run on a data
+dir that was only partially synced from the CLI performs the full backfill,
+newest first.
 
 The writer lock is an `fcntl.flock` on `data/writer.lock`. The service holds
-it for its lifetime. A CLI invoked while the service runs sends an HTTP
-trigger instead of running in-process. A CLI invoked with no service takes
-the lock and runs the job runner itself.
+it for its lifetime and writes `service <url>` into the file next to its pid.
+A CLI command reads the holder: when it names a service, the command sends
+an HTTP trigger and follows the run; otherwise it takes the lock and runs the
+job in-process. `evedw status` and `evedw entities status` read through the
+service for the same reason, because DuckDB does not let a second process
+open `warehouse.duckdb` while the service has it open.
+
+On shutdown the service sets a cancel flag that jobs check between objects
+(sync) or entities (refresh), waits for the current run to notice it, records
+it `cancelled`, and marks queued runs cancelled without starting them.
 
 Every job accepts a date range and a `--force` flag that treats objects in
 range as `changed`. That is the manual backfill path.
@@ -510,17 +546,25 @@ Bound to `127.0.0.1:8470` by default. No authentication, local only.
 
 | method and path | purpose |
 | --- | --- |
-| `GET /datasets` | names, parser versions, object counts, newest and oldest logical date |
-| `GET /datasets/{name}/objects?changed_since=<ts>` | objects whose current revision was imported after a timestamp. The incremental pull primitive for consumers. |
-| `GET /datasets/{name}/objects/{key}` | full revision chain |
-| `POST /jobs/{name}` with `{from, to, force}` | trigger; returns run id |
-| `GET /runs?limit=` and `GET /runs/{id}` | run log |
-| `GET /lake` | partition manifest: table, partition, path, revision, sha256 |
-| `GET /query/{named}?params` | runs a named read query from `store/.../queries/`, returns Arrow IPC stream when `Accept: application/vnd.apache.arrow.stream`, else JSON |
-| `GET /health` | lock held, last run per job, free space |
+| `GET /datasets` | names, parser versions, object counts by status, newest and oldest logical date, plus row counts of the entity tables |
+| `GET /datasets/{name}/objects?changed_since=<ts>` | objects whose current revision was imported after a timestamp (timezone required). The incremental pull primitive for consumers. Without the parameter: every object, oldest first. |
+| `GET /datasets/{name}/objects/{key}` | the object and its full revision chain |
+| `GET /jobs` | job names |
+| `POST /jobs/{name}` with the parameters as a JSON object | queues the job and returns `202` with the run id. Unknown job `404`, bad parameter `422`. Parameters per job: sync `{from, to, force, sweep}`, `entities:seed` `{snapshot, force}`, `entities:refresh` `{budget, populate}`, `verify` `{dataset, from, to, hash, offline}`. |
+| `GET /runs?limit=&job=` and `GET /runs/{id}` | run log |
+| `GET /lake?table=` | partition manifest: table, partition, path, row count, revision, source sha256, parser version, written_at |
+| `GET /query` | the named queries and their parameters |
+| `GET /query/{named}?params` | runs a named read query from `store/.../queries/`, returns an Arrow IPC stream when `Accept: application/vnd.apache.arrow.stream` (row count in `X-Row-Count`), else JSON `{name, row_count, columns, rows}` with rows as objects |
+| `GET /health` | lock held, free space, the current and queued runs, the schedule with next-due times, last run per job |
 
 Named queries are deliberately few: by-date-range reads of each table and
 entity lookups by ID. Analytical queries belong in consumers reading Parquet.
+A query file declares its parameters in leading comment lines
+(`-- param date_from: date required`); kinds are `date`, `int`, `ids` (a
+comma-separated list) and `str`. Entity queries read the live tables, so
+they are fresher than the daily Parquet export. The whole result is built in
+memory before it is streamed; a consumer that wants a year of killmails
+should read the lake directly (see `docs/consumers.md`).
 
 ## 10. Store boundary and swapping
 
@@ -537,7 +581,9 @@ entity lookups by ID. Analytical queries belong in consumers reading Parquet.
   `export_parquet(dir)`.
 - `ResponseCache`: `get(key)`, `put(entry)`, `delete(key)`; the ESI client's
   body and validator store. In DuckDB it is the `esi_cache` table.
-- `Queries`: `run(name, params) -> pyarrow.Table`.
+- `Queries`: `names()`, `describe(name)`, `run(name, params) -> pyarrow.Table`
+  with `params` as the raw strings of a query string, converted by the
+  declared kinds.
 
 The DuckDB backend is the first implementation. Facts live in Parquet
 regardless of backend, so a second backend (ClickHouse, Postgres with ADBC)
@@ -604,7 +650,8 @@ Output is a text table or JSON. It never writes.
 Keys: `DATA_DIR`, `BIND`, `MIN_FREE_GB`, `ESI_CONTACT`, `ESI_DAILY_BUDGET`,
 `ESI_COMPATIBILITY_DATE`, `ESI_REFRESH_INTERVAL`, `ESI_RECENT_DAYS`,
 `EVEREF_BASE_URL`, `ESI_BASE_URL`, `SYNC_INTERVAL_KILLMAILS`,
-`SYNC_INTERVAL_MARKET`, `SWEEP_INTERVAL`, `HEAD_DAYS`, `LOG_LEVEL`.
+`SYNC_INTERVAL_MARKET`, `SWEEP_INTERVAL`, `REFRESH_INTERVAL`, `REFRESH_SLICE`,
+`EXPORT_INTERVAL`, `VERIFY_INTERVAL`, `HEAD_DAYS`, `LOG_LEVEL`.
 Intervals are seconds in the environment. Base URLs are overridable so tests
 can point at a local fixture server.
 

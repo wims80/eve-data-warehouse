@@ -10,6 +10,7 @@ from evedw.sources.esi.client import (
     EsiStoppedError,
     EsiTransientError,
     load_policy,
+    save_policy,
 )
 from evedw.sources.esi.policy import Policy
 
@@ -23,4 +24,5 @@ __all__ = [
     "EsiTransientError",
     "Policy",
     "load_policy",
+    "save_policy",
 ]

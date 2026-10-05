@@ -9,6 +9,7 @@ context so each line carries the run id.
 import fcntl
 import logging
 import os
+import threading
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
@@ -24,9 +25,44 @@ from evedw.store.base import Registry
 
 log = logging.getLogger(__name__)
 
+SERVICE_NOTE = "service"
+"""Lock-file line prefix the service writes so a CLI can find it: ``service <url>``."""
+
 
 class LockHeldError(RuntimeError):
     """Another process holds the writer lock."""
+
+    def __init__(self, path: Path, holder: "LockHolder") -> None:
+        self.path = path
+        self.holder = holder
+        where = f" (service at {holder.service_url})" if holder.service_url else ""
+        super().__init__(
+            f"writer lock {path} is held by {holder.describe()}{where}; "
+            "stop the other evedw process or trigger the job through the service"
+        )
+
+
+@dataclass(frozen=True, slots=True)
+class LockHolder:
+    """What the lock file says about the process holding it."""
+
+    pid: int | None
+    service_url: str | None
+
+    @classmethod
+    def parse(cls, text: str) -> "LockHolder":
+        pid: int | None = None
+        service_url: str | None = None
+        for line in text.splitlines():
+            key, _, value = line.strip().partition(" ")
+            if key == "pid" and value.isdigit():
+                pid = int(value)
+            elif key == SERVICE_NOTE and value:
+                service_url = value
+        return cls(pid=pid, service_url=service_url)
+
+    def describe(self) -> str:
+        return f"pid {self.pid}" if self.pid is not None else "unknown pid"
 
 
 class WriterLock:
@@ -38,7 +74,9 @@ class WriterLock:
     def held(self) -> bool:
         return self._fh is not None
 
-    def acquire(self) -> None:
+    def acquire(self, *, service_url: str | None = None) -> None:
+        """Take the lock or raise ``LockHeldError``. A service passes its URL so that a
+        CLI finding the lock held knows where to send its request instead."""
         if self._fh is not None:
             return
         self.path.parent.mkdir(parents=True, exist_ok=True)
@@ -47,17 +85,31 @@ class WriterLock:
             fcntl.flock(fh.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
         except BlockingIOError:
             fh.seek(0)
-            owner = fh.read().strip() or "unknown pid"
+            holder = LockHolder.parse(fh.read())
             fh.close()
-            raise LockHeldError(
-                f"writer lock {self.path} is held by {owner}; "
-                "stop the other evedw process or trigger the job through the service"
-            ) from None
+            raise LockHeldError(self.path, holder) from None
         fh.seek(0)
         fh.truncate()
         fh.write(f"pid {os.getpid()}\n")
+        if service_url is not None:
+            fh.write(f"{SERVICE_NOTE} {service_url}\n")
         fh.flush()
         self._fh = fh
+
+    def holder(self) -> LockHolder | None:
+        """Who holds the lock right now, without taking it. ``None`` when it is free."""
+        if self._fh is not None:
+            return LockHolder(pid=os.getpid(), service_url=None)
+        if not self.path.exists():
+            return None
+        with self.path.open("r+") as fh:
+            try:
+                fcntl.flock(fh.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+            except BlockingIOError:
+                fh.seek(0)
+                return LockHolder.parse(fh.read())
+            fcntl.flock(fh.fileno(), fcntl.LOCK_UN)
+        return None
 
     def release(self) -> None:
         if self._fh is None:
@@ -79,6 +131,10 @@ class WriterLock:
         self.release()
 
 
+class JobCancelled(Exception):
+    """Raised by a job that noticed ``RunContext.cancel`` was set."""
+
+
 @dataclass(slots=True)
 class JobOutcome:
     objects_changed: int = 0
@@ -92,6 +148,13 @@ class RunContext:
     settings: Settings
     registry: Registry
     params: Mapping[str, Any] = field(default_factory=lambda: {})
+    cancel: threading.Event = field(default_factory=threading.Event)
+    """Set by the service on shutdown. Jobs check it between units of work and raise
+    ``JobCancelled``; the run is then recorded as cancelled."""
+
+    def check_cancelled(self) -> None:
+        if self.cancel.is_set():
+            raise JobCancelled(f"run {self.run_id} cancelled")
 
 
 JobFn = Callable[[RunContext], JobOutcome]
@@ -110,31 +173,41 @@ class JobRunner:
         *,
         trigger: Trigger,
         params: Mapping[str, Any] | None = None,
+        run_id: RunId | None = None,
+        cancel: threading.Event | None = None,
     ) -> ImportRun:
+        """Execute ``fn`` under the run log. ``run_id`` continues a run the registry already
+        holds in status ``queued``; otherwise a new running row is inserted."""
         if not self._lock.held:
             raise RuntimeError("JobRunner.run called without the writer lock held")
         params = dict(params or {})
-        started = self._registry.start_run(job, trigger, params, now=datetime.now(UTC))
+        now = datetime.now(UTC)
+        if run_id is None:
+            run_id = self._registry.start_run(job, trigger, params, now=now).run_id
+        else:
+            self._registry.begin_run(run_id, now=now)
         ctx = RunContext(
-            run_id=started.run_id,
+            run_id=run_id,
             job=job,
             settings=self._settings,
             registry=self._registry,
             params=params,
+            cancel=cancel or threading.Event(),
         )
-        with log_context(run_id=started.run_id, job=job):
+        with log_context(run_id=run_id, job=job):
             log.info("run started trigger=%s params=%s", trigger.value, params)
             try:
                 outcome = fn(ctx)
-            except KeyboardInterrupt:
+            except (KeyboardInterrupt, JobCancelled) as exc:
+                reason = "interrupted" if isinstance(exc, KeyboardInterrupt) else "cancelled"
                 self._registry.finish_run(
-                    started.run_id, RunStatus.CANCELLED, now=datetime.now(UTC), error="interrupted"
+                    run_id, RunStatus.CANCELLED, now=datetime.now(UTC), error=reason
                 )
-                log.warning("run cancelled")
+                log.warning("run %s", reason)
                 raise
             except Exception as exc:
                 self._registry.finish_run(
-                    started.run_id,
+                    run_id,
                     RunStatus.FAILED,
                     now=datetime.now(UTC),
                     error=f"{type(exc).__name__}: {exc}",
@@ -142,7 +215,7 @@ class JobRunner:
                 log.exception("run failed")
                 raise
             self._registry.finish_run(
-                started.run_id,
+                run_id,
                 RunStatus.SUCCEEDED,
                 now=datetime.now(UTC),
                 objects_changed=outcome.objects_changed,
@@ -153,7 +226,7 @@ class JobRunner:
                 outcome.objects_changed,
                 outcome.rows_written,
             )
-        finished = self._registry.get_run(started.run_id)
+        finished = self._registry.get_run(run_id)
         if finished is None:
             raise RuntimeError("run vanished from the registry")
         return finished

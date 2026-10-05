@@ -33,10 +33,15 @@ class RevisionStatus(StrEnum):
 
 
 class RunStatus(StrEnum):
+    QUEUED = "queued"
     RUNNING = "running"
     SUCCEEDED = "succeeded"
     FAILED = "failed"
     CANCELLED = "cancelled"
+
+    @property
+    def finished(self) -> bool:
+        return self in (RunStatus.SUCCEEDED, RunStatus.FAILED, RunStatus.CANCELLED)
 
 
 class Trigger(StrEnum):

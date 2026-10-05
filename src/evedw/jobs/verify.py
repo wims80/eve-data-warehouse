@@ -12,6 +12,8 @@ from evedw.config import Settings
 from evedw.domain.datasets import Dataset
 from evedw.domain.registry import ObjectStatus
 from evedw.domain.schemas import DATASET_TABLES
+from evedw.jobs.runner import JobOutcome, RunContext
+from evedw.sources.everef import EveRefClient
 from evedw.store.base import Lake, Registry
 from evedw.store.duckdb_lake.lake import partition_date, partition_name
 
@@ -177,3 +179,57 @@ def verify_dataset(
                         Issue(dataset.name, None, "orphan_partition", f"{table}/{name}")
                     )
     return report
+
+
+class VerifyError(RuntimeError):
+    """The scheduled verify found issues. The run is recorded as failed with the summary
+    so drift shows up in the run log; the detail is in the service log."""
+
+
+@dataclass(slots=True)
+class VerifyJob:
+    """``verify`` as a job: every dataset, issues logged, failure when any are found."""
+
+    lake: Lake
+    datasets: list[Dataset]
+    client: EveRefClient | None
+    """Source of totals.json; ``None`` skips the expected-count check."""
+    date_from: date | None = None
+    date_to: date | None = None
+    hash_raw: bool = True
+
+    def __call__(self, ctx: RunContext) -> JobOutcome:
+        checked = 0
+        issues: list[Issue] = []
+        for dataset in self.datasets:
+            ctx.check_cancelled()
+            totals = (
+                self.client.totals(dataset)
+                if self.client is not None and dataset.totals_path
+                else None
+            )
+            report = verify_dataset(
+                ctx.settings,
+                ctx.registry,
+                self.lake,
+                dataset,
+                date_from=self.date_from,
+                date_to=self.date_to,
+                hash_raw=self.hash_raw,
+                totals=totals,
+            )
+            checked += report.objects_checked
+            issues.extend(report.issues)
+            for issue in report.issues:
+                log.warning(
+                    "%s %s %s",
+                    issue.kind,
+                    issue.object_key or "-",
+                    issue.detail,
+                    extra={"dataset": issue.dataset},
+                )
+            log.info("%s", report.to_text().splitlines()[0])
+        if issues:
+            kinds = sorted({i.kind for i in issues})
+            raise VerifyError(f"{len(issues)} issues ({', '.join(kinds)}) in {checked} objects")
+        return JobOutcome(objects_changed=checked, rows_written=0)
