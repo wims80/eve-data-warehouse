@@ -53,8 +53,14 @@ Facts below were measured on 2026-10-05 against live EVE Ref data.
   day; the normaliser must still reject deeper nesting loudly rather than
   silently drop it.
 - Days are rewritten in place when late killmails arrive. The `last_modified`
-  of a day can be months after the day itself. Sync therefore diffs every
-  year's index, not a recent tail.
+  of a day can be months after the day itself.
+- The per-year index lags the files it lists. Measured 2026-10-05: the 2026
+  index was regenerated at 07:23 UTC, the files it lists were rewritten at
+  11:35 the same day, and 57 of 275 entries carried an ETag the file no
+  longer had. The 2025 index was last regenerated on 2026-06-22 while two of
+  forty sampled 2025 files had changed since. Indexes for 2020 and 2012
+  matched. The index is therefore the listing, never the change feed; see
+  section 6.
 - Size: a 2026 day is around 3 MB compressed and 15k killmails. 2007 days are
   a few thousand killmails. Full history is in the order of 140M killmails.
 - The same killmail ID can appear in two daily archives (kat found about
@@ -68,8 +74,9 @@ Facts below were measured on 2026-10-05 against live EVE Ref data.
 - CSV header: `average,date,highest,lowest,order_count,volume,http_last_modified,region_id,type_id`.
   All regions are included, about 48k rows per day.
 - Days are rewritten in place, and old days are rewritten long after the fact:
-  the 2026-01-01 file was last modified 2026-10-03. Full-index diff is
-  mandatory here.
+  the 2026-01-01 file was last modified 2026-10-03. The market history index
+  was fresh when measured, but the same header-refresh policy applies to it
+  as to killmails.
 
 ### 2.3 Character, corporation and alliance history
 
@@ -199,17 +206,20 @@ data/
 - Parquet files carry key-value metadata: `dataset`, `object_key`,
   `revision`, `source_sha256`, `parser_version`, `written_at`.
 
-Size expectations, full history, ZSTD Parquet, from the measured day:
+Sizes measured 2026-10-05 from one live year of killmails (363 days,
+2025-10-05 to 2026-10-03) and one month of market history, ZSTD Parquet:
 
-| Table | Per 2026 day | Full history estimate |
+| Table | Per recent day | Full history estimate |
 | --- | --- | --- |
-| killmails | 0.9 MB | 4 GB |
-| attackers | 2 MB | 10 GB |
-| items | 0.9 MB | 4 GB |
-| market_history | 1 MB | 8 GB |
-| raw archives | 4 MB | 15 GB |
+| killmails | 1.2 MB | 6 GB |
+| attackers | 0.8 MB | 4 GB |
+| items | 0.9 MB | 5 GB |
+| market_history | 0.8 MB | 7 GB |
+| raw killmail archives | 3 MB | 15 GB |
+| raw market archives | 0.6 MB | 5 GB |
 
-Everything fits in well under 100 GB. The disk guard is a free-space floor
+Older years have far fewer killmails per day, so the full-history numbers
+are upper bounds. Everything fits in well under 100 GB. The disk guard is a free-space floor
 (`EVEDW_MIN_FREE_GB`, default 20) checked before each download and import.
 
 ## 5. Registry
@@ -263,10 +273,17 @@ next_due_at, etag, failures, last_error`.
 ## 6. Object lifecycle
 
 ```
-discover   fetch per-year index.json; for each entry compare (etag, size,
-           last_modified) with source_object. New or different -> status
-           `changed`. Entries that vanished -> `gone` (data stays). Refresh
-           expected_count from totals.json.
+discover   fetch per-year index.json for the object listing, then HEAD a
+           bounded set of files and take etag, size and last_modified from
+           the response headers, because the index lags the files (section
+           2.1). The set is: every object inside an explicit date range,
+           every object not yet in the registry, every object whose index
+           entry differs from the registry, every object younger than
+           `EVEDW_HEAD_DAYS` (default 120), and on a sweep every object.
+           HEADs run eight at a time; a full killmail sweep is about 7,000
+           requests. Then compare with source_object: new or different ->
+           status `changed`. Entries that vanished -> `gone` (data stays).
+           Refresh expected_count from totals.json.
 fetch      download to scratch, verify Content-Length against index size and
            response ETag against index etag. Mismatch means the upstream file
            moved under us: re-discover that object instead of failing the
@@ -314,6 +331,12 @@ inference across days is not used because it drifts. The reference query is
 The archive reader therefore writes one NDJSON file per day; it never hands
 DuckDB a glob of small files.
 
+Measured 2026-10-05 against live EVE Ref: one year (330 days to import,
+5.53M killmails) synced in 10 min 14 s end to end, about 1.9 s per day
+including download, header checks and the three Parquet writes. Every day's
+row count matched totals.json. `verify` without hashing covers a year in
+under a second; hashing the raw archives is what makes it slow.
+
 Tables, all with leading `source_date DATE`:
 
 - `killmails`: `killmail_id, killmail_hash, killmail_time, http_last_modified,
@@ -332,8 +355,18 @@ negative damage and the source value is preserved.
 
 Schema drift check: each import collects the distinct key sets at the
 top level, `victim`, `attackers[*]` and `victim.items[*]` with `json_keys`
-and compares them with the expected sets. Unknown keys are logged to the run
-and surfaced by `verify`; they do not fail the import.
+and compares them with the expected sets. Unknown keys are logged, written
+into the partition metadata as `evedw.unknown_keys`, and reported by
+`verify` as an `unknown_keys` issue. They do not fail the import. Items
+nested deeper than one level do fail it, with a `NestingError`, because the
+schema would silently drop them otherwise.
+
+The three partitions of a day are written attackers, items, killmails, and
+the registry promotes the revision only after all three. A reader that
+scans two tables during that window can see a new killmails partition next
+to an old attackers partition for that day. Consumers that join tables and
+need a consistent day should filter by the registry's current revision
+through the partition metadata, or read through the service.
 
 Consumer views, generated by the backend and printable with `evedw views`:
 `killmails`, `attackers`, `items` over the partition globs, and
@@ -388,6 +421,7 @@ Conditional requests with stored ETags make unchanged entities cheap.
 | --- | --- | --- |
 | `sync:killmails` | every 6 h | discover, fetch, import changed objects, newest first |
 | `sync:market_history` | every 6 h | same |
+| `sync:*` with sweep | weekly (`EVEDW_SWEEP_INTERVAL`) | same, but every file's headers are re-checked |
 | `entities:refresh` | continuous, paced by ESI policy | drain due refresh queue within budget |
 | `entities:export` | daily | write entity Parquet snapshots |
 | `verify` | weekly | read-only consistency report |

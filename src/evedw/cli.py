@@ -166,6 +166,10 @@ def sync(
     force: Annotated[
         bool, typer.Option("--force", help="Re-import already imported days in range.")
     ] = False,
+    sweep: Annotated[
+        bool,
+        typer.Option("--sweep", help="Re-check the headers of every file, not only recent ones."),
+    ] = False,
 ) -> None:
     """Discover, fetch and import changed objects of a dataset, newest first."""
     settings = _state(ctx).settings
@@ -188,8 +192,15 @@ def sync(
                 date_from=_day(date_from),
                 date_to=_day(date_to),
                 force=force,
+                sweep=sweep,
+                head_days=settings.head_days,
             )
-            params = {"from": _day(date_from), "to": _day(date_to), "force": force}
+            params = {
+                "from": _day(date_from),
+                "to": _day(date_to),
+                "force": force,
+                "sweep": sweep,
+            }
             try:
                 run = JobRunner(settings, registry, lock).run(
                     f"sync:{ds.name}", job, trigger=Trigger.CLI, params=params

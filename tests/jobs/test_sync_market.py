@@ -63,7 +63,7 @@ def test_backfilled_day_gets_a_new_revision_and_only_that_day_is_rewritten(env: 
     env.sync()
     between = datetime.now(UTC)
     before = {day: env.partition(day).stat() for day in (D1, D2, D3)}
-    downloads_before = sum(v for k, v in env.fake.hits.items() if k.endswith(".csv.bz2"))
+    downloads_before = env.fake.downloads()
 
     env.fake.put(D2, market_csv_bz2(D2, rows=250), expected=250)
     run = env.sync()
@@ -91,7 +91,7 @@ def test_backfilled_day_gets_a_new_revision_and_only_that_day_is_rewritten(env: 
     assert before[D2].st_ino != after[D2].st_ino
     assert env.lake.read("market_history", date_from=D2, date_to=D2).num_rows == 250
     assert not list(env.partition(D2).parent.glob("*.tmp"))
-    downloads_after = sum(v for k, v in env.fake.hits.items() if k.endswith(".csv.bz2"))
+    downloads_after = env.fake.downloads()
     assert downloads_after == downloads_before + 1
 
     assert env.registry.objects_changed_since("market_history", between) == [obj]
@@ -150,7 +150,7 @@ def test_failed_import_keeps_previous_partition_and_next_run_recovers(
     assert not list(env.partition(D2).parent.glob("*.tmp"))
 
     monkeypatch.setattr(env.lake, "write_partition", real_write)
-    downloads_before = sum(v for k, v in env.fake.hits.items() if k.endswith(".csv.bz2"))
+    downloads_before = env.fake.downloads()
     run = env.sync()
     assert run.status is RunStatus.SUCCEEDED and run.objects_changed == 1
     obj = env.obj(D2)
@@ -158,30 +158,30 @@ def test_failed_import_keeps_previous_partition_and_next_run_recovers(
     chain = env.registry.revisions("market_history", obj.object_key)
     assert chain[2].sha256 == chain[1].sha256 and chain[2].raw_path == chain[1].raw_path
     # The retained file was reused; nothing was downloaded again.
-    assert sum(v for k, v in env.fake.hits.items() if k.endswith(".csv.bz2")) == downloads_before
+    assert env.fake.downloads() == downloads_before
     assert env.lake.read("market_history", date_from=D2, date_to=D2).num_rows == 250
 
 
 def test_force_reimports_range_without_downloading(env: SyncEnv) -> None:
     publish_three_days(env.fake)
     env.sync()
-    downloads_before = sum(v for k, v in env.fake.hits.items() if k.endswith(".csv.bz2"))
+    downloads_before = env.fake.downloads()
     run = env.sync(date_from=D2, date_to=D3, force=True)
     assert run.objects_changed == 2 and run.rows_written == 300
     assert env.obj(D1).current_revision == 1
     assert env.obj(D2).current_revision == 2 and env.obj(D3).current_revision == 2
-    assert sum(v for k, v in env.fake.hits.items() if k.endswith(".csv.bz2")) == downloads_before
+    assert env.fake.downloads() == downloads_before
 
 
 def test_parser_bump_reimports_from_retained_raw(env: SyncEnv) -> None:
     publish_three_days(env.fake)
     env.sync()
-    downloads_before = sum(v for k, v in env.fake.hits.items() if k.endswith(".csv.bz2"))
+    downloads_before = env.fake.downloads()
     run = env.sync(dataset=replace(MARKET_HISTORY, parser_version=2))
     assert run.objects_changed == 3
     rev = env.registry.current_revision("market_history", env.obj(D1).object_key)
     assert rev is not None and rev.revision == 2 and rev.parser_version == 2
-    assert sum(v for k, v in env.fake.hits.items() if k.endswith(".csv.bz2")) == downloads_before
+    assert env.fake.downloads() == downloads_before
     (partition,) = [
         p for p in env.lake.partitions("market_history") if p.partition == "date=2026-10-01"
     ]

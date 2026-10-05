@@ -8,7 +8,7 @@ import logging
 import shutil
 from collections.abc import Iterable
 from dataclasses import dataclass, field
-from datetime import UTC, date, datetime
+from datetime import UTC, date, datetime, timedelta
 from pathlib import Path
 from typing import Protocol
 
@@ -16,6 +16,7 @@ from evedw.config import Settings
 from evedw.domain.datasets import Dataset
 from evedw.domain.registry import (
     PENDING_STATUSES,
+    DiscoveredObject,
     NewRevision,
     ObjectStatus,
     RevisionStatus,
@@ -95,6 +96,11 @@ class SyncJob:
     date_to: date | None = None
     force: bool = False
     today: date | None = None
+    head_days: int = 120
+    """Objects younger than this always get their file headers refreshed."""
+    sweep: bool = False
+    """Refresh headers of every object, catching rewrites of old days."""
+    head_workers: int = 8
 
     def __call__(self, ctx: RunContext) -> JobOutcome:
         with log_context(dataset=self.dataset.name):
@@ -115,6 +121,7 @@ class SyncJob:
         registry = ctx.registry
         now = datetime.now(UTC)
         found = self.client.discover(self.dataset, self._years())
+        found = self._refresh_headers(ctx, found)
         summary = registry.upsert_objects(found, now=now)
         gone = 0
         if self.date_from is None and self.date_to is None:
@@ -142,6 +149,53 @@ class SyncJob:
             forced,
         )
         return summary.new + summary.changed + outdated + forced
+
+    def _refresh_headers(
+        self, ctx: RunContext, found: list[DiscoveredObject]
+    ) -> list[DiscoveredObject]:
+        """HEAD the files whose index metadata cannot be trusted.
+
+        See ``EveRefClient.refresh_headers`` for why the index is not enough.
+        """
+        today = self.today or datetime.now(UTC).date()
+        tail_start = today - timedelta(days=self.head_days)
+        ranged = self.date_from is not None or self.date_to is not None
+        existing = {o.object_key: o for o in ctx.registry.objects(dataset=self.dataset.name)}
+        selected: list[int] = []
+        for index, obj in enumerate(found):
+            if ranged:
+                # A targeted run touches only its range, and all of it.
+                if self._in_range(obj.logical_date):
+                    selected.append(index)
+                continue
+            known = existing.get(obj.object_key)
+            if (
+                self.sweep
+                or known is None
+                or known.differs_from(obj)
+                or (obj.logical_date is not None and obj.logical_date >= tail_start)
+            ):
+                selected.append(index)
+        if not selected:
+            return found
+        log.info("refreshing headers of %d of %d objects", len(selected), len(found))
+        refreshed = self.client.refresh_headers(
+            (found[i] for i in selected), workers=self.head_workers
+        )
+        result = list(found)
+        for index, obj in zip(selected, refreshed, strict=True):
+            result[index] = obj
+        return result
+
+    def _in_range(self, day: date | None) -> bool:
+        """True when an explicit range was given and ``day`` falls inside it."""
+        if self.date_from is None and self.date_to is None:
+            return False
+        if day is None:
+            return False
+        if self.date_from is not None and day < self.date_from:
+            return False
+        return not (self.date_to is not None and day > self.date_to)
 
     # -- fetch and import ----------------------------------------------------------------
 

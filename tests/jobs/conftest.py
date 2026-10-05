@@ -22,5 +22,5 @@ def env(settings: Settings, registry: Registry) -> Iterator[SyncEnv]:
             BASE_URL, client=httpx.Client(), backoff_seconds=0.0, sleep=lambda _: None
         )
         with WriterLock(settings.lock_path) as lock:
-            yield SyncEnv(settings, registry, open_lake(settings), lock, client, fake)
+            yield SyncEnv(settings, registry, open_lake(settings), lock, client, fake, router)
         client.close()

@@ -12,7 +12,8 @@ import os
 import random
 import time
 from collections.abc import Callable, Iterable
-from dataclasses import dataclass
+from concurrent.futures import ThreadPoolExecutor
+from dataclasses import dataclass, replace
 from datetime import datetime
 from pathlib import Path
 from typing import Any
@@ -200,6 +201,37 @@ class EveRefClient:
                 )
         return found
 
+    def refresh_headers(
+        self, objects: Iterable[DiscoveredObject], *, workers: int = 8
+    ) -> list[DiscoveredObject]:
+        """Replace etag, size and last_modified with what a HEAD of each file reports now.
+
+        EVE Ref regenerates a year's index.json on its own schedule, which lags the files
+        it lists by hours for the current year and by months for past years. The file's
+        own headers are the truth; the index is only the listing.
+        """
+        items = list(objects)
+        if not items:
+            return []
+
+        def refresh(obj: DiscoveredObject) -> DiscoveredObject:
+            response = self._request("HEAD", obj.url)
+            if response is None:
+                log.warning("HEAD %s returned 404; keeping index metadata", obj.url)
+                return obj
+            length = response.headers.get("Content-Length")
+            size = int(length) if length and length.isdigit() else obj.size
+            return replace(
+                obj,
+                etag=normalize_etag(response.headers.get("ETag")) or obj.etag,
+                size=size,
+                last_modified=parse_http_date(response.headers.get("Last-Modified"))
+                or obj.last_modified,
+            )
+
+        with ThreadPoolExecutor(max_workers=max(1, workers)) as pool:
+            return list(pool.map(refresh, items))
+
     # -- download ------------------------------------------------------------------------
 
     def download(
@@ -288,10 +320,13 @@ class EveRefClient:
 
     def _get(self, url: str) -> httpx.Response | None:
         """GET with retries. Returns ``None`` on 404."""
+        return self._request("GET", url)
+
+    def _request(self, method: str, url: str) -> httpx.Response | None:
         last_error: Exception | None = None
         for attempt in range(self._attempts):
             try:
-                response = self._client.get(url)
+                response = self._client.request(method, url)
                 if response.status_code == 404:
                     return None
                 if response.status_code in RETRY_STATUS:

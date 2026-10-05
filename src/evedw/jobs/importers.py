@@ -10,4 +10,8 @@ def importer_for(dataset: Dataset, lake: Lake) -> Importer:
         from evedw.jobs.market import MarketHistoryImporter
 
         return MarketHistoryImporter(lake)
+    if dataset.name == "killmails":
+        from evedw.jobs.killmails import KillmailImporter
+
+        return KillmailImporter(lake)
     raise NotImplementedError(f"no importer for dataset {dataset.name!r} yet")

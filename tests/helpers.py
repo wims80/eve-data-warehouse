@@ -16,7 +16,7 @@ import respx
 from evedw.config import Settings
 from evedw.domain.datasets import MARKET_HISTORY, Dataset
 from evedw.domain.registry import Trigger
-from evedw.jobs.market import MarketHistoryImporter
+from evedw.jobs.importers import importer_for
 from evedw.jobs.runner import JobRunner, WriterLock
 from evedw.jobs.sync import SyncJob
 from evedw.sources.everef import EveRefClient
@@ -39,6 +39,16 @@ def market_csv_bz2(day: date, *, rows: int | None = None) -> bytes:
 
 def market_name(day: date) -> str:
     return f"market-history-{day.isoformat()}.csv.bz2"
+
+
+def killmail_name(day: date) -> str:
+    return f"killmails-{day.isoformat()}.tar.bz2"
+
+
+KILLMAIL_FIXTURE = FIXTURES / "killmails" / "killmails-2026-10-01.tar.bz2"
+"""49 real killmails from 2026-10-01 (containers, moon, war, NPC attackers, no items, no
+position, one with over 100 attackers) plus one synthetic member, id 900000001, carrying
+negative damage values as ESI history sometimes does."""
 
 
 def md5(data: bytes) -> str:
@@ -70,9 +80,15 @@ class FakeEveRef:
         self.modified: dict[date, datetime] = {}
         self.totals: dict[str, int] = {}
         self.serve_instead: dict[date, bytes] = {}
+        """Bytes a GET returns instead of the published file; HEAD is unaffected."""
+        self.stale_index: dict[date, bytes] = {}
+        """Days whose index entry still describes these older bytes."""
         self.hits: Counter[str] = Counter()
+        """Request counts keyed by ``"<METHOD> <path>"``."""
         self.missing_years: set[int] = set()
-        router.get(url__regex=rf"{base_url}/{self.prefix}/.*").mock(side_effect=self._handle)
+        router.route(method__in=["GET", "HEAD"], url__regex=rf"{base_url}/{self.prefix}/.*").mock(
+            side_effect=self._handle
+        )
 
     def put(
         self,
@@ -87,12 +103,23 @@ class FakeEveRef:
         if expected is not None:
             self.totals[self.dataset.totals_key(day)] = expected
 
+    def requests(self, method: str, *, suffix: str = "") -> int:
+        """Number of requests of ``method`` whose path ends with ``suffix``."""
+        return sum(
+            n
+            for key, n in self.hits.items()
+            if key.startswith(f"{method} ") and key.endswith(suffix)
+        )
+
+    def downloads(self) -> int:
+        return self.requests("GET", suffix=self.name_for(date(2000, 1, 1))[-8:])
+
     def url_for(self, day: date) -> str:
         return f"{self.base_url}/{self.prefix}/{day.year}/{self.name_for(day)}"
 
     def _handle(self, request: httpx.Request) -> httpx.Response:
         path = request.url.path
-        self.hits[path] += 1
+        self.hits[f"{request.method} {path}"] += 1
         parts = path.strip("/").split("/")
         if parts[-1] == "totals.json":
             return httpx.Response(200, json=self.totals)
@@ -110,22 +137,26 @@ class FakeEveRef:
                     "type": self.prefix,
                     "url": self.url_for(day),
                 }
-                for day, data in sorted(self.files.items())
+                for day, data in sorted(
+                    (d, self.stale_index.get(d, b)) for d, b in self.files.items()
+                )
                 if day.year == year
             ]
             body = {"files": entries, "path": f"{self.prefix}/{year}"}
             return httpx.Response(200, content=json.dumps(body).encode())
         for day, data in self.files.items():
             if parts[-1] == self.name_for(day):
-                body = self.serve_instead.get(day, data)
-                return httpx.Response(
-                    200,
-                    content=body,
-                    headers={
-                        "ETag": f'"{md5(body)}"',
-                        "Last-Modified": self.modified[day].strftime("%a, %d %b %Y %H:%M:%S GMT"),
-                    },
-                )
+                # HEAD describes the published file; serve_instead only affects the GET body,
+                # modelling a rewrite between header refresh and download.
+                body = data if request.method == "HEAD" else self.serve_instead.get(day, data)
+                headers = {
+                    "ETag": f'"{md5(body)}"',
+                    "Content-Length": str(len(body)),
+                    "Last-Modified": self.modified[day].strftime("%a, %d %b %Y %H:%M:%S GMT"),
+                }
+                if request.method == "HEAD":
+                    return httpx.Response(200, headers=headers)
+                return httpx.Response(200, content=body, headers=headers)
         return httpx.Response(404)
 
 
@@ -141,17 +172,21 @@ class SyncEnv:
     lock: WriterLock
     client: EveRefClient
     fake: FakeEveRef
+    router: respx.Router
+
+    def fake_for(self, dataset: Dataset, name_for: Callable[[date], str]) -> FakeEveRef:
+        return FakeEveRef(self.router, dataset, name_for=name_for)
 
     def sync(self, dataset: Dataset = MARKET_HISTORY, **kwargs: Any) -> Any:
         job = SyncJob(
             dataset=dataset,
             client=self.client,
-            importer=MarketHistoryImporter(self.lake),
+            importer=importer_for(dataset, self.lake),
             today=TODAY,
             **kwargs,
         )
         runner = JobRunner(self.settings, self.registry, self.lock)
-        return runner.run("sync:market_history", job, trigger=Trigger.MANUAL, params=kwargs)
+        return runner.run(f"sync:{dataset.name}", job, trigger=Trigger.MANUAL, params=kwargs)
 
     def obj(self, day: date) -> Any:
         key = f"{day.year}/market-history-{day.isoformat()}.csv.bz2"

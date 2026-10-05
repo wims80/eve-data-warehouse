@@ -1,6 +1,6 @@
 # Implementation plan
 
-Status: M0 and M1 complete (2026-10-05). Next: M2.
+Status: M0, M1 and M2 complete (2026-10-05). Next: M3.
 
 Milestones are ordered so that each one leaves a working, testable system.
 Do not start a milestone before the previous one's acceptance checks pass.
@@ -83,6 +83,11 @@ a full year imports without manual intervention; `verify` reports the
 expected-count gaps for days where totals.json disagrees, without failing.
 Record the measured per-day import time in design §7.1 if it differs
 materially from the prototype.
+
+Outcome: the first live run failed 31 of 33 days because the killmail
+index lags the files (design §2.1). Discovery now refreshes file headers
+with HEAD requests for a bounded set of objects (design §6), and `sync`
+gained `--sweep` for the weekly full re-check.
 
 ## M3. Entities
 

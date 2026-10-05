@@ -122,6 +122,11 @@ def verify_dataset(
                             f"registry says {revision.observed_count}",
                         )
                     )
+                unknown = info.metadata.get("evedw.unknown_keys")
+                if index == 0 and unknown and unknown != "{}":
+                    report.issues.append(
+                        Issue(dataset.name, obj.object_key, "unknown_keys", unknown)
+                    )
                 meta_rev = info.metadata.get("evedw.revision")
                 if meta_rev is not None and meta_rev != str(revision.revision):
                     report.issues.append(

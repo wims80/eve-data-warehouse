@@ -25,10 +25,15 @@ class Settings(BaseSettings):
 
     sync_interval_killmails: timedelta = Field(default=timedelta(hours=6))
     sync_interval_market: timedelta = Field(default=timedelta(hours=6))
+    sweep_interval: timedelta = Field(default=timedelta(days=7))
+    head_days: int = 120
+    """Days back from today whose file headers are re-checked on every sync."""
 
     log_level: str = "INFO"
 
-    @field_validator("sync_interval_killmails", "sync_interval_market", mode="before")
+    @field_validator(
+        "sync_interval_killmails", "sync_interval_market", "sweep_interval", mode="before"
+    )
     @classmethod
     def _seconds_as_timedelta(cls, value: object) -> object:
         """Accept plain seconds from the environment, e.g. ``EVEDW_SYNC_INTERVAL_MARKET=3600``."""
