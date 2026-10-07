@@ -124,6 +124,26 @@ tables instead and reflect the latest ESI refresh. Rows carry `observed_at`
 and `source` (`esi` or `everef_backfill:<sha256>`); `deleted` is true for
 characters in Doomheim, closed corporations and anything ESI returned 404 for.
 
+To find the newest employment or alliance record, order by `start_date` and
+then `record_id`. `start_date` has minute precision, and a character often
+passes through an NPC corporation and into a player corporation in the same
+minute (about 300,000 characters have such a pair), so `start_date` alone,
+or DuckDB's `arg_max(corporation_id, start_date)`, picks either. `arg_max`
+also skips rows whose value is NULL, which hides a corporation's latest
+"left the alliance" record; use `arg_max_null` or a window:
+
+```sql
+SELECT character_id, corporation_id
+FROM (SELECT *, row_number() OVER (PARTITION BY character_id
+                                   ORDER BY start_date DESC, record_id DESC) AS n
+      FROM character_employment)
+WHERE n = 1;
+```
+
+The current corporation is also on `characters.corporation_id`, kept up to
+date by the weekly affiliation cycle, which is fresher than history when
+ESI's history lags.
+
 ## Triggering a job
 
 ```sh

@@ -576,12 +576,41 @@ GETs at about 220 a minute; at 0.1 s at 325 a minute, and at 0.05 s at
 377 a minute, about 540,000 a day. Each GET cycle is now mostly ESI's
 response time (about 0.1 s), so a lower floor gains little: even none would
 give at most about 550 a minute. At 540,000 a day character history (16.5M
-characters, one request each) completes in about a month. The budget was 80,000 (about eight months) until
-the adaptive pace replaced the fixed one-second spacing on 2026-10-07, then
+characters, one request each) completes in about a month. The budget was
+80,000 (about eight months) until the adaptive pace replaced the fixed
+one-second spacing on 2026-10-07, then
 300,000, which the drain slightly exceeded; it was raised to 800,000 with
 the 0.05 s floor on 2026-10-08 after a clean first cycle (0 errors, 0
 slowdowns), so it stays a safety cap above what the pace can send.
 `evedw entities status` shows the sweep state and the queue per class.
+
+First live run (M6 acceptance, 2026-10-07 and 08):
+
+- Alliance sweep 15:20 to 16:30 UTC: 3,643 live alliances listed, 14,824
+  stored alliances marked closed, 1,703 corporations moved to a new
+  alliance and queued as changes.
+- Affiliation cycle 16:31 to 22:35 UTC, unattended: 17,969,441 characters
+  checked, 171,366 changed corporation (about 1%), concentrated among the
+  newest ids (the last 5M checked produced 42,000 of them).
+- Crawl feed, first pass, about 4.5 minutes of DuckDB work and no ESI
+  requests: 3,645,815 of 3,804,176 killmail characters and 525,629 of
+  550,554 killmail corporations had no queue entry and were queued.
+- Spot checks with the service stopped: 3 sweep-moved corporations and 3
+  changed characters matched live ESI; of the entities refreshed since,
+  3,005 of 3,005 corporations and 2,993 of 3,009 characters agree with
+  their newest history record. The 16 that do not are most likely ESI's
+  corporation history lagging affiliation, and settle on the next
+  refresh. About 1,300 characters whose stored corporation already
+  differed from their stored history only had an alliance or faction
+  change, so they were written but not queued; the crawl brings their
+  history. Newest record means newest `start_date`, then `record_id`:
+  294,430 characters have two records with the same `start_date`.
+- Storage per row in DuckDB: characters 35.7 B, character_employment
+  25.2 B, corporations 39.9 B, refresh queue 4.4 B. A full crawl at 3 to 9
+  employment records per character adds about 1.3 to 3.8 GB to
+  `warehouse.duckdb` (2.4 GB now) and 0.6 to 1.8 GB to the Parquet export.
+- Still to record: the first full UTC day's request mix, and crawl
+  throughput once the change and active queues have drained.
 
 Export job (`evedw entities export`): `COPY` each table to
 `lake/entities/<table>.parquet.tmp`, fsync, replace. `evedw views` adds a
