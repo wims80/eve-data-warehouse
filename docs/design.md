@@ -631,6 +631,13 @@ job in-process. `evedw status` and `evedw entities status` read through the
 service for the same reason, because DuckDB does not let a second process
 open `warehouse.duckdb` while the service has it open.
 
+`evedw speed [--seconds N] [--watch]` (added 2026-10-08) reads the ESI
+counters in `policy.json` and the refresh state the same way, twice, `N`
+seconds apart (default 60), and prints requests per minute with a daily
+projection, when the budget would run out, affiliation cycle progress with
+an upper bound on the time left, and queue growth per class. It sends no ESI
+requests; `--watch` repeats until Ctrl-C.
+
 On shutdown the service sets a cancel flag that jobs check between objects
 (sync) or entities (refresh), waits for the current run to notice it, records
 it `cancelled`, and marks queued runs cancelled without starting them.

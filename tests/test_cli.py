@@ -237,6 +237,23 @@ def test_serve_fails_fast_when_lock_held(data_dir: Path) -> None:
     assert result.exit_code == 1 and "writer lock" in result.output
 
 
+def test_speed_without_a_service(data_dir: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    assert runner.invoke(app, ["--data-dir", str(data_dir), "migrate"]).exit_code == 0
+    policy_path = data_dir / "esi" / "policy.json"
+    policy_path.parent.mkdir(parents=True, exist_ok=True)
+    policy_path.write_text(json.dumps({"requests": 10}))
+
+    def more_requests(_seconds: float) -> None:
+        policy_path.write_text(json.dumps({"requests": 20}))
+
+    monkeypatch.setattr("evedw.cli.time.sleep", more_requests)
+    result = runner.invoke(app, ["--data-dir", str(data_dir), "speed", "--seconds", "1"])
+    assert result.exit_code == 0, result.output
+    assert re.search(r"esi\s+[\d,]+ requests/min", result.output)
+    assert "affiliation    cycle not started" in result.output
+    assert "queue          change +0" in result.output
+
+
 def test_esi_resume_edits_only_the_policy_file(data_dir: Path) -> None:
     policy_path = data_dir / "esi" / "policy.json"
     policy_path.parent.mkdir(parents=True)

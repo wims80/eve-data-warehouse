@@ -5,6 +5,7 @@ one, the job is queued over HTTP and the command follows the run until it finish
 there is none, the command takes the writer lock and runs the same job in-process.
 """
 
+import time
 from collections.abc import Generator
 from contextlib import contextmanager
 from dataclasses import dataclass
@@ -19,6 +20,7 @@ from evedw.config import Settings
 from evedw.domain.datasets import DATASETS, get_dataset
 from evedw.domain.registry import DatasetSummary, ImportRun, RunStatus, Trigger
 from evedw.domain.schemas import ENTITY_TABLES
+from evedw.domain.speed import Sample, describe
 from evedw.jobs.catalog import JobCatalog, UnknownJobError
 from evedw.jobs.refresh import refresh_status
 from evedw.jobs.runner import JobCancelled, LockHeldError, WriterLock
@@ -533,6 +535,63 @@ def entities_export(ctx: typer.Context, no_wait: NoWait = False) -> None:
 def entities_status(ctx: typer.Context) -> None:
     """Row counts of the entity tables."""
     _print_entity_counts(_state(ctx).settings)
+
+
+def _speed_sample(settings: Settings) -> Sample:
+    policy = load_policy(settings.esi_policy_path)
+    characters: int | None = None
+    with _service(settings) as service:
+        if service is not None:
+            _, counts = service.datasets()
+            queue, sweeps = service.entity_refresh()
+            characters = counts.get("characters")
+        else:
+            if not settings.warehouse_path.exists():
+                raise _fail(f"no warehouse at {settings.warehouse_path}; run `evedw migrate`")
+            registry = open_registry(settings, read_only=True)
+            try:
+                _require_migrated(registry)
+                queue, sweeps = refresh_status(registry, now=datetime.now(UTC))
+            finally:
+                registry.close()
+    return Sample(
+        at=datetime.now(UTC),
+        esi_requests=policy.requests,
+        budget_used=settings.esi_daily_budget
+        - policy.budget_remaining(settings.esi_daily_budget, datetime.now(UTC).date()),
+        pace=max(policy.spacing, settings.esi_spacing),
+        cycle=dict(sweeps.get("affiliation_cycle", {})),
+        queue={name: numbers["entries"] for name, numbers in queue.items()},
+        characters=characters,
+    )
+
+
+@app.command()
+def speed(
+    ctx: typer.Context,
+    seconds: Annotated[
+        int, typer.Option("--seconds", min=1, help="Length of the measuring window.")
+    ] = 60,
+    watch: Annotated[
+        bool, typer.Option("--watch", help="Keep measuring, one report per window, until Ctrl-C.")
+    ] = False,
+) -> None:
+    """Measure ESI requests, affiliation progress and queue growth over a window.
+
+    Reads the counters twice, ``--seconds`` apart; sends no ESI requests."""
+    settings = _state(ctx).settings
+    before = _speed_sample(settings)
+    try:
+        while True:
+            time.sleep(seconds)
+            after = _speed_sample(settings)
+            print("\n".join(describe(before, after, budget=settings.esi_daily_budget)))
+            if not watch:
+                return
+            print()
+            before = after
+    except KeyboardInterrupt:
+        return
 
 
 # --- esi ----------------------------------------------------------------------------------
