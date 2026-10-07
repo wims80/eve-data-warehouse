@@ -566,14 +566,21 @@ the registry's `sweep_state`, so a restart resumes where the slice stopped.
    out of the job, which records the run as failed; nothing else talks to
    ESI until `evedw esi resume`.
 
-The daily budget (`EVEDW_ESI_DAILY_BUDGET`, default 300,000) bounds all of
+The daily budget (`EVEDW_ESI_DAILY_BUDGET`, default 800,000) bounds all of
 it. Steps 1 to 4 need a few thousand requests a day plus the change rate;
-the crawl gets the rest. At the calm pace (section 11) the response time,
-not the budget, is usually the limit: one request in flight with 0.2 s
-spacing sends about 200,000 to 290,000 a day, which completes character
-history (16.5M characters, one request each) in two to three months. The
-budget was 80,000 (about eight months) until the adaptive pace replaced the
-fixed one-second spacing on 2026-10-07.
+the crawl gets the rest. At the calm pace (section 11) the pace, not the
+budget, is the limit. Measured 2026-10-07 and 08 with one request in
+flight: at 0.2 s spacing affiliation batches went out at about 120 a minute
+(ESI takes about 0.3 s to answer one) and the drain's detail and history
+GETs at about 220 a minute; at 0.1 s at 325 a minute, and at 0.05 s at
+377 a minute, about 540,000 a day. Each GET cycle is now mostly ESI's
+response time (about 0.1 s), so a lower floor gains little: even none would
+give at most about 550 a minute. At 540,000 a day character history (16.5M
+characters, one request each) completes in about a month. The budget was 80,000 (about eight months) until
+the adaptive pace replaced the fixed one-second spacing on 2026-10-07, then
+300,000, which the drain slightly exceeded; it was raised to 800,000 with
+the 0.05 s floor on 2026-10-08 after a clean first cycle (0 errors, 0
+slowdowns), so it stays a safety cap above what the pace can send.
 `evedw entities status` shows the sweep state and the queue per class.
 
 Export job (`evedw entities export`): `COPY` each table to
@@ -715,8 +722,18 @@ Binding for every ESI request made by this project, including ad hoc scripts.
   for the routes we use (none sends `X-RateLimit-Group`); what gets an
   application banned is ignoring the error limit or getting around the cache
   (developers.eveonline.com, checked 2026-10-07). So the next request waits
-  `EVEDW_ESI_SPACING` (0.2 s) after the previous response when calm, which
-  with one request in flight is at most 5 a second. A warning sign doubles
+  `EVEDW_ESI_SPACING` (0.05 s; 0.2 s until 2026-10-08, then briefly 0.1 s)
+  after the previous response when calm, which with one request in flight
+  is at most 20 a second, in practice about 6 for small GETs because ESI's
+  response time (about 0.1 s, measured 2026-10-08 with the service at 10%
+  CPU) adds to the gap. CCP's
+  pages (rate limiting and best practices, checked 2026-10-08) set no
+  request-rate cap for routes without a bucket and ask only that the shared
+  API is not abused and that clients do not operate at a limit; a steady
+  single stream fits that, back-to-back requests at about 14 a second
+  around the clock would push it, so the floor stays above zero. They also
+  warn of an undocumented limiter that can answer 429 without headers,
+  which the pace treats as a warning sign like any other 429. A warning sign doubles
   the spacing, at most once a minute, up to 2 s: a 429, 420 or 5xx, a
   transport error, fewer than 90 of the 100 legacy errors left in the
   window, or a rate-limit bucket below half. After 5 quiet minutes the
@@ -750,8 +767,9 @@ Binding for every ESI request made by this project, including ad hoc scripts.
 - A 420 or a 403 sets `stopped` with the reason; every later request raises
   until an operator runs `evedw esi resume`. Other 4xx are permanent for
   that request: raised to the caller, recorded on the entity, not retried.
-- A daily request budget (`EVEDW_ESI_DAILY_BUDGET`, default 300,000, raised
-  from 80,000 with the adaptive pace on 2026-10-07) counts requests sent,
+- A daily request budget (`EVEDW_ESI_DAILY_BUDGET`, default 800,000; 80,000
+  until the adaptive pace on 2026-10-07, then 300,000, and 800,000 with the
+  0.05 s floor on 2026-10-08) counts requests sent,
   including revalidations and retries, not cache hits; it is kept in the
   policy file and resets by UTC day.
 - `POST /universe/names` and `POST /characters/affiliation` batch at most
@@ -762,7 +780,7 @@ Binding for every ESI request made by this project, including ad hoc scripts.
 - ESI's error limit is 100 non-2xx/3xx responses a minute on routes
   without bucket limits; past it every route answers 420, and CCP warns
   that ignoring it can get an application banned (checked 2026-10-07).
-  At 5 requests a second the limit could be reached in 20 seconds of
+  At 20 requests a second the limit could be reached in 5 seconds of
   errors, so three guards stack: the pace slows from the tenth error in a
   window, every request pauses until the window resets when 20 or fewer
   remain, and a refresh slice counts

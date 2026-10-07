@@ -40,9 +40,9 @@ downward.
 ## ESI
 
 Design §11 is binding for every ESI request, including one-off scripts you
-run while debugging. One request in flight, one second spacing, conditional
-requests, honour every cache and rate header, stop on 420 or 403. Check the
-current endpoint specification at
+run while debugging. One request in flight, the adaptive spacing of §11,
+conditional requests, honour every cache and rate header, stop on 420 or 403.
+Check the current endpoint specification at
 https://developers.eveonline.com/api-explorer before adding an endpoint, and
 keep the compatibility date pinned in `config.py`.
 
