@@ -27,10 +27,17 @@ def pytest_collection_modifyitems(config: pytest.Config, items: list[pytest.Item
         items[:] = keep
 
 
+@pytest.fixture(autouse=True)
+def _isolated_home(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """The CLI reads ``.env`` from the project home, which is this checkout unless
+    ``EVEDW_HOME`` says otherwise; the real one must never reach a test."""
+    monkeypatch.setenv("EVEDW_HOME", str(tmp_path))
+
+
 @pytest.fixture
 def settings(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Settings:
     # Keep the real .env and environment out of tests.
-    for key in [k for k in os.environ if k.startswith("EVEDW_")]:
+    for key in [k for k in os.environ if k.startswith("EVEDW_") and k != "EVEDW_HOME"]:
         monkeypatch.delenv(key)
     return Settings(data_dir=tmp_path / "data", _env_file=None)  # type: ignore[call-arg]
 

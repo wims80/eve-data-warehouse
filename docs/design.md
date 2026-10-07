@@ -789,6 +789,12 @@ Output is a text table or JSON. It never writes.
 ## 13. Configuration
 
 `pydantic-settings`, prefix `EVEDW_`, loaded from environment and `.env`.
+Both are anchored to a home directory (decided 2026-10-08), so `evedw` works
+from any directory once installed with `uv tool install --editable .`: the
+home is `EVEDW_HOME` if set, else the source checkout the package runs from,
+else the current directory. `.env` is read from the home, and a relative
+`DATA_DIR` from it or the environment resolves against the home; `--data-dir`
+resolves against the current directory, where it was typed.
 Keys: `DATA_DIR`, `BIND`, `MIN_FREE_GB`, `ESI_CONTACT`, `ESI_DAILY_BUDGET`, `ESI_SPACING`,
 `ESI_COMPATIBILITY_DATE`, `ESI_REFRESH_INTERVAL`, `ESI_RECENT_DAYS`,
 `EVEREF_BASE_URL`, `ESI_BASE_URL`, `SYNC_INTERVAL_KILLMAILS`,

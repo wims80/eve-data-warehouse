@@ -155,7 +155,10 @@ def _print_run(run: ImportRun | None, *, objects: str = "objects imported") -> N
 def main(
     ctx: typer.Context,
     data_dir: Annotated[
-        Path | None, typer.Option("--data-dir", help="Overrides EVEDW_DATA_DIR.")
+        Path | None,
+        typer.Option(
+            "--data-dir", help="Overrides EVEDW_DATA_DIR. Relative to the current directory."
+        ),
     ] = None,
     log_level: Annotated[
         str | None, typer.Option("--log-level", help="Overrides EVEDW_LOG_LEVEL.")
@@ -163,10 +166,10 @@ def main(
 ) -> None:
     overrides: dict[str, object] = {}
     if data_dir is not None:
-        overrides["data_dir"] = data_dir
+        overrides["data_dir"] = data_dir.resolve()  # relative to where it was typed
     if log_level is not None:
         overrides["log_level"] = log_level
-    settings = Settings(**overrides)  # type: ignore[arg-type]
+    settings = Settings.load(**overrides)
     setup_logging(settings.log_level)
     ctx.obj = CliState(settings=settings)
 

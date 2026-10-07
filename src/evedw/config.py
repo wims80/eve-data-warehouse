@@ -1,10 +1,24 @@
 """Application settings. Every key is overridable with an EVEDW_ environment variable."""
 
+import os
 from datetime import timedelta
 from pathlib import Path
 
 from pydantic import Field, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
+
+
+def project_home() -> Path:
+    """Where ``.env`` is read and a relative data dir resolves (design §13), so ``evedw``
+    works from any directory: ``EVEDW_HOME``, else the source checkout this package runs
+    from (an editable install), else the current directory."""
+    explicit = os.environ.get("EVEDW_HOME", "").strip()
+    if explicit:
+        return Path(explicit).expanduser().resolve()
+    checkout = Path(__file__).resolve().parents[2]
+    if (checkout / "pyproject.toml").is_file() and (checkout / "src" / "evedw").is_dir():
+        return checkout
+    return Path.cwd()
 
 
 class Settings(BaseSettings):
@@ -49,6 +63,16 @@ class Settings(BaseSettings):
     """Days back from today whose file headers are re-checked on every sync."""
 
     log_level: str = "INFO"
+
+    @classmethod
+    def load(cls, **overrides: object) -> "Settings":
+        """Settings from the environment and ``<home>/.env``; a relative data dir from
+        either is taken relative to the home. Overrides are used as given."""
+        home = project_home()
+        settings = cls(_env_file=home / ".env", **overrides)  # type: ignore[call-arg]
+        if not settings.data_dir.is_absolute():
+            settings = settings.model_copy(update={"data_dir": home / settings.data_dir})
+        return settings
 
     @field_validator("esi_contact", mode="before")
     @classmethod
