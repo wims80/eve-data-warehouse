@@ -1,12 +1,13 @@
 """``/datasets``: summaries, the incremental-pull object listing, revision chains."""
 
-from datetime import datetime
+from datetime import UTC, datetime
 from typing import Annotated
 
 from fastapi import APIRouter, HTTPException, Query, Request
 
 from evedw.domain.datasets import DATASETS, get_dataset
 from evedw.domain.schemas import ENTITY_TABLES
+from evedw.jobs.refresh import refresh_status
 from evedw.service.models import (
     DatasetOut,
     DatasetsOut,
@@ -24,12 +25,15 @@ router = APIRouter(prefix="/datasets", tags=["datasets"])
 def list_datasets(request: Request) -> DatasetsOut:
     state = state_of(request)
     summaries = {s.dataset: s for s in state.registry.dataset_summaries()}
+    queue, sweeps = refresh_status(state.registry, now=datetime.now(UTC))
     return DatasetsOut(
         datasets=[
             DatasetOut.from_domain(name, ds.parser_version, summaries.get(name))
             for name, ds in sorted(DATASETS.items())
         ],
         entities={table: state.entities.count(table) for table in ENTITY_TABLES},
+        refresh_queue=queue,
+        refresh_state=sweeps,
     )
 
 

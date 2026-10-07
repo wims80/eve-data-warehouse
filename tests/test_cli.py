@@ -30,16 +30,16 @@ def test_status_before_migrate(data_dir: Path) -> None:
 def test_migrate_then_status(data_dir: Path) -> None:
     result = runner.invoke(app, ["--data-dir", str(data_dir), "migrate"])
     assert result.exit_code == 0, result.output
-    assert "upgraded from version 0 to 2" in result.output
+    assert "upgraded from version 0 to 3" in result.output
     assert (data_dir / "warehouse.duckdb").exists()
 
     result = runner.invoke(app, ["--data-dir", str(data_dir), "migrate"])
     assert result.exit_code == 0
-    assert "current at version 2" in result.output
+    assert "current at version 3" in result.output
 
     result = runner.invoke(app, ["--data-dir", str(data_dir), "status"])
     assert result.exit_code == 0, result.output
-    assert "schema        version 2" in result.output
+    assert "schema        version 3" in result.output
     assert "killmails" in result.output
     assert "market_history" in result.output
     assert "no runs recorded" in result.output
@@ -58,11 +58,13 @@ def test_entities_and_esi_status(data_dir: Path) -> None:
     result = runner.invoke(app, ["--data-dir", str(data_dir), "entities", "status"])
     assert result.exit_code == 0, result.output
     assert "characters" in result.output and "corporation_alliance_history" in result.output
+    assert "change" in result.output and "crawl" in result.output
+    assert "affiliation_cycle      not started" in result.output
 
     result = runner.invoke(app, ["--data-dir", str(data_dir), "esi", "status"])
     assert result.exit_code == 0, result.output
     assert "stopped        no" in result.output
-    assert "0 of 20000 used" in result.output
+    assert "0 of 80000 used" in result.output
 
     result = runner.invoke(app, ["--data-dir", str(data_dir), "esi", "resume"])
     assert result.exit_code == 0 and "not stopped" in result.output

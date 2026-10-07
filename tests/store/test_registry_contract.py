@@ -290,12 +290,66 @@ def test_refresh_queue_orders_never_refreshed_and_stalest_first(registry: Regist
         )
     )
     assert [e.entity_id for e in registry.refresh_pop(limit=10, now=NOW)] == [2, 3, 1]
-    assert registry.refreshed_since(NOW - timedelta(days=3)) == {("character", 1)}
-    assert registry.refreshed_since(NOW - timedelta(days=30)) == {
+
+
+def test_refresh_kinds_take_turns_within_a_priority(registry: Registry) -> None:
+    """Corporations must not wait behind every queued character."""
+    registry.refresh_push(
+        [RefreshEntry("character", i, priority=1, next_due_at=NOW) for i in range(1, 6)]
+        + [RefreshEntry("corporation", i, priority=1, next_due_at=NOW) for i in (7, 8)]
+        + [RefreshEntry("alliance", 9, priority=3, next_due_at=NOW)]
+        + [RefreshEntry("character", 10, priority=0, next_due_at=NOW)]
+    )
+    popped = [(e.kind, e.entity_id) for e in registry.refresh_pop(limit=10, now=NOW)]
+    assert popped == [
+        ("character", 10),
         ("character", 1),
+        ("corporation", 7),
+        ("character", 2),
+        ("corporation", 8),
         ("character", 3),
-    }
-    assert registry.refreshed_since(NOW) == set()
+        ("character", 4),
+        ("character", 5),
+        ("alliance", 9),
+    ]
+
+
+def test_refresh_filter_and_counts(registry: Registry) -> None:
+    registry.refresh_push(
+        [
+            RefreshEntry("character", 1, priority=1, next_due_at=NOW),
+            RefreshEntry("character", 2, priority=2, next_due_at=NOW + timedelta(days=9)),
+            RefreshEntry("character", 3, priority=3, next_due_at=NOW),
+            RefreshEntry("corporation", 4, priority=1, next_due_at=NOW),
+        ]
+    )
+    for entity_id, at in ((1, NOW - timedelta(days=40)), (2, NOW - timedelta(days=2))):
+        registry.refresh_update(
+            RefreshEntry(
+                "character",
+                entity_id,
+                priority=2,
+                next_due_at=NOW + timedelta(days=9),
+                last_refreshed_at=at,
+            )
+        )
+    # No entry at all: 4 is a corporation entry, so as a character it is unknown.
+    assert registry.refresh_filter("character", [5, 4, 3, 2, 1, 5]) == [4, 5]
+    stale = registry.refresh_filter(
+        "character", [1, 2, 3, 4, 5], refreshed_before=NOW - timedelta(days=30)
+    )
+    assert stale == [1, 3, 4, 5]  # 1 is stale, 3 never refreshed, 4 and 5 unknown
+    assert registry.refresh_filter("character", []) == []
+    assert registry.refresh_counts(now=NOW) == {1: (1, 1), 2: (2, 0), 3: (1, 1)}
+
+
+def test_sweep_state_round_trips(registry: Registry) -> None:
+    assert registry.state_get("refresh.alliance_sweep") is None
+    registry.state_put("refresh.alliance_sweep", '{"pos": 1}', now=NOW)
+    registry.state_put("refresh.alliance_sweep", '{"pos": 2}', now=NOW)
+    registry.state_put("refresh.crawl", "{}", now=NOW)
+    assert registry.state_get("refresh.alliance_sweep") == '{"pos": 2}'
+    assert registry.state_get("refresh.crawl") == "{}"
 
 
 def test_dataset_summaries(registry: Registry) -> None:

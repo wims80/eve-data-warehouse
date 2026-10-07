@@ -4,7 +4,7 @@ import bz2
 import io
 import json
 import tarfile
-from datetime import UTC, date, datetime, timedelta
+from datetime import UTC, date, datetime
 from pathlib import Path
 from typing import Any
 
@@ -14,21 +14,17 @@ import pyarrow.parquet as pq
 import pytest
 
 from evedw.domain.datasets import ENTITIES_BACKFILL
-from evedw.domain.registry import ObjectStatus, RefreshEntry, RunStatus, Trigger
-from evedw.domain.schemas import ATTACKERS, KILLMAILS
+from evedw.domain.registry import ObjectStatus, RunStatus, Trigger
+from evedw.jobs.catalog import JobCatalog
 from evedw.jobs.entities import (
     BackfillImporter,
     ExportJob,
-    RefreshJob,
-    ids_from_killmails,
     seed_members,
 )
 from evedw.jobs.runner import JobRunner
 from evedw.jobs.sync import SyncJob
 from evedw.sources.archives import extract_members
-from evedw.sources.esi import EsiClient, EsiStoppedError
 from evedw.store.base import EntityStore
-from tests.fake_esi import ESI_URL, FakeClock, FakeEsi, MemoryCache
 from tests.helpers import BASE_URL, FIXTURES, TODAY, SyncEnv, md5
 
 ARCHIVE = FIXTURES / "entities" / "eve-kill-com-karbowiak-2026-05-10.tar.bz2"
@@ -130,6 +126,26 @@ def test_seed_reports_unknown_keys(
     assert counts.unknown_keys == {"alliances": ["new_field"], "characters": ["history.extra"]}
 
 
+def test_seed_skips_error_placeholders(members: dict[str, Path], entities: EntityStore) -> None:
+    """eve-kill exports hold placeholders for entities it failed to fetch."""
+    chars = json.loads(members["characters.json"].read_text())
+    chars.append({"character_id": 2100000001, "error": "Character not found", "history": []})
+    chars.append({"character_id": 2100000002, "history": [], "deleted": True})
+    chars[0]["error"] = {"status": 500}
+    members["characters.json"].write_text(json.dumps(chars))
+    corps = json.loads(members["corporations.json"].read_text())
+    corps.append({"corporation_id": 98999999, "error": "timeout"})
+    members["corporations.json"].write_text(json.dumps(corps))
+    counts = seed_members(members, entities, source="x", snapshot=SNAPSHOT_AT)
+    assert counts.rows["characters"] == len(chars) - 3
+    assert (
+        entities.lookup("characters", [2100000001, 2100000002, chars[0]["character_id"]]).num_rows
+        == 0
+    )
+    assert entities.lookup("corporations", [98999999]).num_rows == 0
+    assert counts.unknown_keys["characters"] == ["error"]
+
+
 def test_seed_is_idempotent_and_esi_wins(members: dict[str, Path], entities: EntityStore) -> None:
     seed_members(members, entities, source="everef_backfill:abc", snapshot=SNAPSHOT_AT)
     before = entities.lookup("characters", [90000059]).to_pylist()[0]
@@ -224,6 +240,25 @@ def test_seed_job_registers_archive_and_is_idempotent(env: SyncEnv, entities: En
     assert fake.hits[f"GET /characters-corporations-alliances/backfills/{ARCHIVE.name}"] == 1
 
 
+def test_seed_all_imports_every_unseeded_archive_through_the_catalog(
+    env: SyncEnv, entities: EntityStore
+) -> None:
+    """The scheduled seed: no snapshot named, whatever is listed and not imported."""
+    fake = FakeBackfills(env, ARCHIVE.read_bytes())
+    env.settings.everef_base_url = BASE_URL  # the catalog builds its own EVE Ref client
+    catalog = JobCatalog(env.settings, env.registry, env.lake, entities)
+    run = catalog.run("entities:seed", {"snapshot": "all"}, trigger=Trigger.SCHEDULE, lock=env.lock)
+    assert run.status is RunStatus.SUCCEEDED and run.objects_changed == 1
+    assert run.params == {"snapshot": "all", "force": False}
+    assert entities.count("character_employment") == 75
+
+    again = catalog.run(
+        "entities:seed", {"snapshot": "all"}, trigger=Trigger.SCHEDULE, lock=env.lock
+    )
+    assert again.status is RunStatus.SUCCEEDED and again.objects_changed == 0
+    assert fake.hits[f"GET /characters-corporations-alliances/backfills/{ARCHIVE.name}"] == 1
+
+
 def test_seed_job_rejects_archive_without_members(env: SyncEnv, entities: EntityStore) -> None:
     buf = io.BytesIO()
     with tarfile.open(fileobj=buf, mode="w") as tar:
@@ -245,251 +280,6 @@ def test_seed_job_rejects_archive_without_members(env: SyncEnv, entities: Entity
         )
     obj = env.registry.get_object("entities_backfill", f"2026/{ARCHIVE.name}")
     assert obj is not None and obj.status is ObjectStatus.FAILED
-
-
-# --- refresh ----------------------------------------------------------------------------
-
-
-def write_killmails(env: SyncEnv, day: date) -> None:
-    killmails = pa.Table.from_pylist(
-        [
-            {
-                "source_date": day,
-                "killmail_id": 1,
-                "victim_character_id": 90000059,
-                "victim_corporation_id": 98000030,
-                "victim_alliance_id": 99000001,
-            },
-            {"source_date": day, "killmail_id": 2, "victim_corporation_id": 1000001},
-        ],
-        schema=KILLMAILS,
-    )
-    attackers = pa.Table.from_pylist(
-        [
-            {
-                "source_date": day,
-                "killmail_id": 1,
-                "ordinal": 0,
-                "character_id": 90000089,
-                "corporation_id": 98000030,
-                "alliance_id": None,
-            },
-            {"source_date": day, "killmail_id": 1, "ordinal": 1, "corporation_id": 1000125},
-        ],
-        schema=ATTACKERS,
-    )
-    env.lake.write_partition("killmails", f"source_date={day}", killmails, metadata={})
-    env.lake.write_partition("attackers", f"source_date={day}", attackers, metadata={})
-
-
-def test_ids_from_killmails(env: SyncEnv) -> None:
-    write_killmails(env, TODAY - timedelta(days=2))
-    write_killmails(env, TODAY - timedelta(days=40))
-    found = ids_from_killmails(env.lake, date_from=TODAY - timedelta(days=7))
-    assert found == {
-        "character": {90000059, 90000089},
-        "corporation": {98000030, 1000001, 1000125},
-        "alliance": {99000001},
-    }
-
-
-def character_body(name: str, corporation_id: int = 98000030) -> dict[str, Any]:
-    return {
-        "name": name,
-        "corporation_id": corporation_id,
-        "alliance_id": 99000001,
-        "birthday": "2010-11-02T17:37:00Z",
-        "security_status": -1.5,
-        "bloodline_id": 1,
-        "gender": "male",
-        "race_id": 1,
-        "achievement_score": 0,
-    }
-
-
-@pytest.fixture
-def esi(env: SyncEnv) -> tuple[FakeEsi, FakeClock, EsiClient]:
-    fake = FakeEsi(env.router)
-    clock = FakeClock(now=TODAY_AT.timestamp())
-    client = EsiClient(
-        ESI_URL,
-        compatibility_date="2026-08-18",
-        contact="tests@example.test",
-        cache=MemoryCache(),
-        policy_path=env.settings.esi_policy_path,
-        daily_budget=1000,
-        client=httpx.Client(),
-        sleep=clock.sleep,
-        clock=clock.time,
-    )
-    return fake, clock, client
-
-
-def serve_entities(fake: FakeEsi) -> None:
-    fake.put("/characters/90000059", character_body("Victim"), etag="c1")
-    fake.put(
-        "/characters/90000059/corporationhistory",
-        [
-            {"record_id": 1, "corporation_id": 1000009, "start_date": "2010-11-02T17:28:00Z"},
-            {"record_id": 2, "corporation_id": 98000030, "start_date": "2011-01-02T15:27:00Z"},
-        ],
-        etag="h1",
-    )
-    fake.put("/characters/90000089", character_body("Attacker", 1000001), etag="c2")
-    fake.put("/characters/90000089/corporationhistory", [], etag="h2")
-    corp: dict[str, Any] = {
-        "name": "Corp",
-        "ticker": "CORP",
-        "alliance_id": 99000001,
-        "ceo_id": 90000059,
-        "member_count": 12,
-        "date_founded": "2010-11-02T20:05:00Z",
-        "state": "active",
-        "description": "",
-        "friendly_fire": "legal",
-        "home_station_id": 60000001,
-        "shares": 1000,
-        "tax_rates": {},
-        "type": "player_owned",
-        "war_eligible": True,
-    }
-    for cid in (98000030, 1000001, 1000125):
-        fake.put(f"/corporations/{cid}", dict(corp, name=f"Corp {cid}"), etag=f"k{cid}")
-        fake.put(
-            f"/corporations/{cid}/alliancehistory",
-            [
-                {"record_id": 5, "alliance_id": 99000001, "start_date": "2012-05-08T06:20:00Z"},
-                {"record_id": 6, "start_date": "2012-11-26T16:14:00Z", "is_deleted": True},
-            ],
-            etag=f"a{cid}",
-        )
-    fake.put(
-        "/alliances/99000001",
-        {
-            "name": "Alliance",
-            "ticker": "ALLY",
-            "executor_corporation_id": 98000030,
-            "date_founded": "2010-11-02T12:01:00Z",
-            "creator_corporation_id": 98000030,
-            "creator_id": 90000059,
-        },
-        etag="al",
-    )
-
-
-def run_refresh(env: SyncEnv, job: RefreshJob) -> Any:
-    return JobRunner(env.settings, env.registry, env.lock).run(
-        "entities:refresh", job, trigger=Trigger.MANUAL
-    )
-
-
-def test_refresh_populates_drains_and_paces(
-    env: SyncEnv, entities: EntityStore, esi: tuple[FakeEsi, FakeClock, EsiClient]
-) -> None:
-    fake, clock, client = esi
-    serve_entities(fake)
-    write_killmails(env, TODAY - timedelta(days=1))
-    job = RefreshJob(client, entities, env.lake, today=TODAY, now=lambda: TODAY_AT)
-    start = clock.now
-    run = run_refresh(env, job)
-    assert run.status is RunStatus.SUCCEEDED
-    assert run.objects_changed == 6  # 2 characters, 3 corporations, 1 alliance
-    requests = sum(fake.hits.values())
-    assert requests == 2 + 2 + 2 * 3 + 1 == 11
-    assert clock.now - start >= requests - 1  # one second between requests
-
-    victim = entities.lookup("characters", [90000059]).to_pylist()[0]
-    assert victim["name"] == "Victim" and victim["source"] == "esi" and victim["deleted"] is False
-    assert victim["observed_at"] == TODAY_AT
-    attacker = entities.lookup("characters", [90000089]).to_pylist()[0]
-    assert attacker["deleted"] is True  # Doomheim
-    employment = entities.lookup("character_employment", [90000059]).to_pylist()
-    assert [e["record_id"] for e in employment] == [1, 2]
-    assert employment[0]["start_date"] == datetime(2010, 11, 2, 17, 28, tzinfo=UTC)
-    history = entities.lookup("corporation_alliance_history", [98000030]).to_pylist()
-    assert history[1]["alliance_id"] is None and history[1]["is_deleted"] is True
-    corp = entities.lookup("corporations", [1000125]).to_pylist()[0]
-    assert corp["name"] == "Corp 1000125" and corp["member_count"] == 12
-    assert entities.lookup("alliances", [99000001]).to_pylist()[0]["ticker"] == "ALLY"
-
-    # Queue entries moved out of the due window with the entity's validator.
-    due = env.registry.refresh_pop(limit=100, now=TODAY_AT)
-    assert due == []
-    later = env.registry.refresh_pop(limit=100, now=TODAY_AT + timedelta(days=31))
-    assert len(later) == 6
-    entry = next(e for e in later if e.kind == "character" and e.entity_id == 90000059)
-    assert entry.priority == 2 and entry.etag == '"c1"' and entry.last_refreshed_at == TODAY_AT
-
-    # A second run: nothing due, nothing requested.
-    before = sum(fake.hits.values())
-    run = run_refresh(env, job)
-    assert run.objects_changed == 0 and sum(fake.hits.values()) == before
-
-
-def test_refresh_respects_run_budget_and_leaves_the_rest_due(
-    env: SyncEnv, entities: EntityStore, esi: tuple[FakeEsi, FakeClock, EsiClient]
-) -> None:
-    fake, _, client = esi
-    serve_entities(fake)
-    write_killmails(env, TODAY - timedelta(days=1))
-    job = RefreshJob(client, entities, env.lake, today=TODAY, now=lambda: TODAY_AT, budget=3)
-    run = run_refresh(env, job)
-    assert run.status is RunStatus.SUCCEEDED
-    assert sum(fake.hits.values()) == 3
-    # Never-refreshed entries come first, ordered by kind: the alliance (one request) then
-    # one character (two). The next character would exceed the budget, so it stays due.
-    assert run.objects_changed == 2
-    assert len(env.registry.refresh_pop(limit=100, now=TODAY_AT)) == 4
-
-
-def test_refresh_stops_on_420_and_records_the_run_as_failed(
-    env: SyncEnv, entities: EntityStore, esi: tuple[FakeEsi, FakeClock, EsiClient]
-) -> None:
-    fake, _, client = esi
-    serve_entities(fake)
-    fake.put("/alliances/99000001", {}, status=420, headers={"X-ESI-Error-Limit-Reset": "30"})
-    env.registry.refresh_push(
-        [RefreshEntry(kind="alliance", entity_id=99000001, priority=1, next_due_at=TODAY_AT)]
-    )
-    job = RefreshJob(client, entities, env.lake, populate=False, now=lambda: TODAY_AT)
-    with pytest.raises(EsiStoppedError):
-        run_refresh(env, job)
-    run = env.registry.runs(limit=1)[0]
-    assert run.status is RunStatus.FAILED and "420" in (run.error or "")
-    assert client.policy.stopped
-
-
-def test_refresh_marks_missing_entities_deleted_and_backs_off_transient(
-    env: SyncEnv,
-    entities: EntityStore,
-    esi: tuple[FakeEsi, FakeClock, EsiClient],
-    members: dict[str, Path],
-) -> None:
-    fake, _, client = esi
-    seed_members(members, entities, source="everef_backfill:abc", snapshot=SNAPSHOT_AT)
-    fake.put("/characters/90000059", {"error": "gone"}, status=404)
-    fake.put("/alliances/99000001", {}, status=503)
-    env.registry.refresh_push(
-        [
-            RefreshEntry(kind="character", entity_id=90000059, priority=1, next_due_at=TODAY_AT),
-            RefreshEntry(kind="alliance", entity_id=99000001, priority=1, next_due_at=TODAY_AT),
-        ]
-    )
-    job = RefreshJob(client, entities, env.lake, populate=False, now=lambda: TODAY_AT)
-    run = run_refresh(env, job)
-    assert run.status is RunStatus.SUCCEEDED and run.objects_changed == 1
-    row = entities.lookup("characters", [90000059]).to_pylist()[0]
-    assert row["deleted"] is True and row["source"] == "esi" and row["name"]
-    entries = {
-        (e.kind, e.entity_id): e
-        for e in env.registry.refresh_pop(limit=10, now=TODAY_AT + timedelta(days=400))
-    }
-    gone = entries[("character", 90000059)]
-    assert gone.failures == 1 and gone.last_error == "HTTP 404"
-    assert gone.next_due_at > TODAY_AT + timedelta(days=300)
-    flaky = entries[("alliance", 99000001)]
-    assert flaky.failures == 1 and "503" in (flaky.last_error or "")
-    assert TODAY_AT < flaky.next_due_at <= TODAY_AT + timedelta(hours=2)
 
 
 # --- export -----------------------------------------------------------------------------

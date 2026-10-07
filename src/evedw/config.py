@@ -16,7 +16,7 @@ class Settings(BaseSettings):
     store_backend: str = "duckdb"
 
     esi_contact: str | None = None
-    esi_daily_budget: int = 20_000
+    esi_daily_budget: int = 80_000
     # Latest date listed by https://esi.evetech.net/meta/compatibility-dates on 2026-10-05.
     # Re-check the endpoint specification when changing it (design §11).
     esi_compatibility_date: str = "2026-08-18"
@@ -36,6 +36,12 @@ class Settings(BaseSettings):
     refresh_slice: int = 1_500
     """Requests one scheduled refresh slice may send before yielding to other jobs."""
     export_interval: timedelta = Field(default=timedelta(days=1))
+    seed_interval: timedelta = Field(default=timedelta(days=1))
+    alliance_sweep_interval: timedelta = Field(default=timedelta(days=1))
+    """How often every live alliance's member corporations are listed."""
+    affiliation_cycle: timedelta = Field(default=timedelta(days=7))
+    """How often every live character's corporation is checked, 1,000 per request."""
+    """How often the backfill listing is checked for archives not yet seeded."""
     verify_interval: timedelta = Field(default=timedelta(days=7))
     head_days: int = 120
     """Days back from today whose file headers are re-checked on every sync."""
@@ -56,6 +62,9 @@ class Settings(BaseSettings):
         "sweep_interval",
         "refresh_interval",
         "export_interval",
+        "seed_interval",
+        "alliance_sweep_interval",
+        "affiliation_cycle",
         "verify_interval",
         "esi_refresh_interval",
         mode="before",

@@ -10,7 +10,7 @@ from evedw.domain.datasets import MARKET_HISTORY
 from evedw.domain.registry import ObjectStatus, RevisionStatus, RunStatus
 from evedw.jobs.sync import SyncError
 from evedw.jobs.verify import verify_dataset
-from tests.helpers import D1, D2, D3, SyncEnv, market_csv_bz2, publish_three_days
+from tests.helpers import D1, D2, D3, SyncEnv, market_csv_bz2, market_name, publish_three_days
 
 
 def test_initial_sync_imports_everything_newest_first(env: SyncEnv) -> None:
@@ -286,3 +286,19 @@ def test_offline_skips_objects_that_were_never_fetched(env: SyncEnv) -> None:
     assert not env.fake.hits
     assert env.obj(D1).status is ObjectStatus.NEW and env.obj(D2).status is ObjectStatus.NEW
     assert env.obj(D3).status is ObjectStatus.IMPORTED
+
+
+def test_unsupported_object_is_skipped_not_fetched(env: SyncEnv) -> None:
+    publish_three_days(env.fake)
+    dataset = replace(MARKET_HISTORY, unsupported=((market_name(D2), "test format"),))
+    run = env.sync(dataset=dataset)
+    assert run.status is RunStatus.SUCCEEDED and run.objects_changed == 2
+    skipped = env.obj(D2)
+    assert skipped.status is ObjectStatus.SKIPPED and skipped.last_error == "test format"
+    assert skipped.current_revision is None and not env.partition(D2).exists()
+    downloads = env.fake.downloads()
+
+    again = env.sync(dataset=dataset)
+    assert again.status is RunStatus.SUCCEEDED and again.objects_changed == 0
+    assert env.obj(D2).status is ObjectStatus.SKIPPED
+    assert env.fake.downloads() == downloads

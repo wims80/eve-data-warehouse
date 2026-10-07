@@ -77,6 +77,7 @@ def default_jobs(settings: Settings) -> list[ScheduledJob]:
         ScheduledJob(
             "entities:refresh", settings.refresh_interval, {"budget": settings.refresh_slice}
         ),
+        ScheduledJob("entities:seed", settings.seed_interval, {"snapshot": "all"}),
         ScheduledJob("entities:export", settings.export_interval),
         ScheduledJob("verify", settings.verify_interval, {"hash": True}, defer_first=True),
     ]

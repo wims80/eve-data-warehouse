@@ -55,6 +55,10 @@ class ServiceClient:
         out = DatasetsOut.model_validate(self._request("GET", "/datasets"))
         return [d.to_domain() for d in out.datasets], out.entities
 
+    def entity_refresh(self) -> tuple[dict[str, dict[str, int]], dict[str, Any]]:
+        out = DatasetsOut.model_validate(self._request("GET", "/datasets"))
+        return out.refresh_queue, out.refresh_state
+
     def runs(self, *, limit: int = 20, job: str | None = None) -> list[ImportRun]:
         params: dict[str, Any] = {"limit": limit}
         if job is not None:

@@ -27,6 +27,13 @@ class Dataset:
     listing_path: str | None = None
     """Directory under the base URL whose HTML listing is parsed when there is no
     index.json. Its ``index.json`` is still tried first."""
+    unsupported: tuple[tuple[str, str], ...] = ()
+    """``(object file name, reason)`` of upstream objects this dataset cannot import.
+    Sync marks them ``skipped`` instead of fetching them."""
+
+    def unsupported_reason(self, object_key: str) -> str | None:
+        name = object_key.rpartition("/")[2]
+        return next((reason for n, reason in self.unsupported if n == name), None)
 
     def years(self, today: date) -> range:
         return range(self.first_date.year, today.year + 1)
@@ -83,7 +90,7 @@ MARKET_HISTORY = Dataset(
 
 ENTITIES_BACKFILL = Dataset(
     name="entities_backfill",
-    parser_version=1,
+    parser_version=2,
     first_date=date(2024, 5, 31),
     index_path=None,
     totals_path=None,
@@ -92,6 +99,13 @@ ENTITIES_BACKFILL = Dataset(
         r"^eve-kill-com-karbowiak-(?P<date>\d{4}-\d{2}-\d{2})\.tar\.bz2$"
     ),
     listing_path="characters-corporations-alliances/backfills",
+    unsupported=(
+        (
+            "eve-kill-com-karbowiak-2024-05-31.tar.bz2",
+            "MongoDB export format (newline-delimited, $oid/$date wrappers); "
+            "superseded by the later snapshots",
+        ),
+    ),
 )
 
 DATASETS: dict[str, Dataset] = {d.name: d for d in (KILLMAILS, MARKET_HISTORY, ENTITIES_BACKFILL)}

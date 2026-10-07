@@ -186,31 +186,48 @@ class EsiClient:
 
     # -- public requests -----------------------------------------------------------------
 
-    def get(self, route: str, *, fallback_seconds: int = 3600) -> EsiResponse:
+    def get(self, route: str, *, fallback_seconds: int = 3600, store: bool = True) -> EsiResponse:
+        """``store=False`` neither reads nor writes the response cache: for requests the
+        caller will not repeat within their cache lifetime (design §11)."""
         if not route.startswith("/") or "?" in route or "#" in route:
             raise ValueError(f"ESI GET needs a canonical path, got {route!r}")
-        return self._request("GET", route, body=None, fallback_seconds=fallback_seconds)
+        return self._request(
+            "GET", route, body=None, fallback_seconds=fallback_seconds, store=store
+        )
 
     def post_ids(
-        self, route: str, ids: Collection[int], *, fallback_seconds: int = 3600
+        self,
+        route: str,
+        ids: Collection[int],
+        *,
+        fallback_seconds: int = 3600,
+        store: bool = True,
     ) -> EsiResponse:
-        """POST a batch of at most 1,000 distinct positive IDs, e.g. ``/universe/names/``."""
+        """POST a batch of at most 1,000 distinct positive IDs, e.g. ``/universe/names``."""
         unique = sorted({int(i) for i in ids})
         if not unique or len(unique) > MAX_BATCH or unique[0] <= 0:
             raise ValueError(f"ESI batches take 1 to {MAX_BATCH} distinct positive IDs")
         body = json.dumps(unique, separators=(",", ":"))
-        return self._request("POST", route, body=body, fallback_seconds=fallback_seconds)
+        return self._request(
+            "POST", route, body=body, fallback_seconds=fallback_seconds, store=store
+        )
 
     # -- the one request path ------------------------------------------------------------
 
     def _request(
-        self, method: str, route: str, *, body: str | None, fallback_seconds: int
+        self,
+        method: str,
+        route: str,
+        *,
+        body: str | None,
+        fallback_seconds: int,
+        store: bool = True,
     ) -> EsiResponse:
         policy = self._policy
         if policy.stopped:
             raise EsiStoppedError(f"ESI access is stopped: {policy.stopped}; resume to continue")
         key = cache_key(self.base_url, method, route, body)
-        cached = self._cache.get(key)
+        cached = self._cache.get(key) if store else None
         now = self._now()
         if cached is not None and int(cached.expires_at.timestamp()) > now:
             policy.cache_hits += 1
@@ -296,7 +313,8 @@ class EsiClient:
                 fallback=fallback_seconds,
                 previous=None,
             )
-            self._store(key, entry, response_headers)
+            if store:
+                self._store(key, entry, response_headers)
             return self._from_cache(entry, not_modified=False, fresh=True)
         raise EsiTransientError(
             f"ESI {route}: giving up after {self._attempts} attempts ({last_error}); "
@@ -314,7 +332,7 @@ class EsiClient:
             if not waited:
                 self._policy.pauses += 1
                 waited = True
-                log.info("ESI pacing: waiting %.0fs", remaining)
+                log.debug("ESI pacing: waiting %.0fs", remaining)
             self._sleep(min(MAX_WAIT_STEP, max(0.05, remaining)))
 
     def _back_off(self, attempt: int, route: str, reason: str) -> None:

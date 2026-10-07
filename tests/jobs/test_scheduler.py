@@ -27,6 +27,7 @@ def test_default_jobs_skip_refresh_without_contact(settings: Settings) -> None:
         "sync:market_history",
         "sync:killmails sweep",
         "sync:market_history sweep",
+        "entities:seed",
         "entities:export",
         "verify hash",
     ]
@@ -34,6 +35,8 @@ def test_default_jobs_skip_refresh_without_contact(settings: Settings) -> None:
     with_refresh = {j.name: j for j in default_jobs(settings)}
     assert with_refresh["entities:refresh"].params == {"budget": settings.refresh_slice}
     assert with_refresh["entities:refresh"].interval == settings.refresh_interval
+    assert with_refresh["entities:seed"].params == {"snapshot": "all"}
+    assert with_refresh["entities:seed"].interval == settings.seed_interval
 
 
 def test_seed_uses_last_matching_run(registry: Registry) -> None:

@@ -20,6 +20,7 @@ from evedw.domain.datasets import DATASETS, get_dataset
 from evedw.domain.registry import DatasetSummary, ImportRun, RunStatus, Trigger
 from evedw.domain.schemas import ENTITY_TABLES
 from evedw.jobs.catalog import JobCatalog, UnknownJobError
+from evedw.jobs.refresh import refresh_status
 from evedw.jobs.runner import JobCancelled, LockHeldError, WriterLock
 from evedw.jobs.verify import VerifyReport, verify_dataset
 from evedw.logs import setup_logging
@@ -439,14 +440,17 @@ def entities_seed(
     ctx: typer.Context,
     snapshot: Annotated[
         str,
-        typer.Argument(help="Backfill snapshot date (YYYY-MM-DD) or 'latest'."),
+        typer.Argument(
+            help="Backfill snapshot date (YYYY-MM-DD), 'latest', or 'all' for every "
+            "archive not yet imported."
+        ),
     ] = "latest",
     force: Annotated[bool, typer.Option("--force", help="Re-import an imported snapshot.")] = False,
     no_wait: NoWait = False,
 ) -> None:
     """Import an EVE Ref character/corporation/alliance backfill into the entity tables."""
     settings = _state(ctx).settings
-    if snapshot != "latest":
+    if snapshot not in ("latest", "all"):
         try:
             date.fromisoformat(snapshot)
         except ValueError:
@@ -463,6 +467,7 @@ def _print_entity_counts(settings: Settings) -> None:
     with _service(settings) as service:
         if service is not None:
             _, counts = service.datasets()
+            queue, sweeps = service.entity_refresh()
         else:
             with _writer(settings) as (_, registry):
                 _require_migrated(registry)
@@ -471,8 +476,17 @@ def _print_entity_counts(settings: Settings) -> None:
                     counts = {table: entities.count(table) for table in ENTITY_TABLES}
                 finally:
                     entities.close()
+                queue, sweeps = refresh_status(registry, now=datetime.now(UTC))
     for table, count in counts.items():
         print(f"{table:<30} {count:>12}")
+    print()
+    print(f"{'refresh queue':<30} {'entries':>12} {'due':>12}")
+    for cls, numbers in queue.items():
+        print(f"  {cls:<28} {numbers['entries']:>12} {numbers['due']:>12}")
+    print()
+    for name, value in sweeps.items():
+        detail = ", ".join(f"{k}={v}" for k, v in sorted(value.items())) or "not started"
+        print(f"{name:<22} {detail}")
 
 
 @entities_app.command("refresh")
@@ -486,7 +500,7 @@ def entities_refresh(
     ] = None,
     no_populate: Annotated[
         bool,
-        typer.Option("--no-populate", help="Do not scan recent killmails for new entity IDs."),
+        typer.Option("--no-populate", help="Only drain the queue: no sweeps, no new work."),
     ] = False,
     no_wait: NoWait = False,
 ) -> None:

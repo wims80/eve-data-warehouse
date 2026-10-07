@@ -151,15 +151,31 @@ class Registry(Protocol):
         ...
 
     def refresh_pop(self, *, limit: int, now: datetime) -> list[RefreshEntry]:
-        """Due entries: best priority first, then never refreshed, then longest ago
-        refreshed, then earliest due. Does not remove them."""
+        """Due entries, best priority first. Within a priority the kinds take turns (equal
+        turns: earliest due, then kind); within a kind: never refreshed, then longest ago
+        refreshed, then earliest due, then id. Does not remove them."""
         ...
 
     def refresh_update(self, entry: RefreshEntry) -> None: ...
 
-    def refreshed_since(self, since: datetime) -> set[tuple[str, int]]:
-        """``(kind, entity_id)`` of entries refreshed at or after ``since``."""
+    def refresh_filter(
+        self, kind: str, ids: Collection[int], *, refreshed_before: datetime | None = None
+    ) -> list[int]:
+        """The ``ids`` worth queueing, ascending: those with no entry, and when
+        ``refreshed_before`` is given also those never refreshed or refreshed before it."""
         ...
+
+    def refresh_counts(self, *, now: datetime) -> dict[int, tuple[int, int]]:
+        """Priority -> (entries, entries due at ``now``)."""
+        ...
+
+    # -- sweep state ---------------------------------------------------------------------
+
+    def state_get(self, key: str) -> str | None:
+        """A small JSON document a job stored under ``key``, or None."""
+        ...
+
+    def state_put(self, key: str, value: str, *, now: datetime) -> None: ...
 
     # -- reporting -----------------------------------------------------------------------
 
@@ -211,6 +227,21 @@ class EntityStore(Protocol):
 
     def lookup(self, table: str, ids: Collection[int]) -> pa.Table:
         """Rows whose primary entity id is in ``ids``, in the table's schema."""
+        ...
+
+    def ids(
+        self,
+        table: str,
+        *,
+        live_only: bool = False,
+        where: Mapping[str, int] | None = None,
+        after: int | None = None,
+        descending: bool = False,
+        limit: int | None = None,
+    ) -> list[int]:
+        """Distinct primary entity ids of ``table`` in id order, for cursors. ``live_only``
+        drops rows marked deleted; ``where`` filters on integer columns by equality;
+        ``after`` starts strictly beyond that id in the iteration direction."""
         ...
 
     def count(self, table: str) -> int: ...

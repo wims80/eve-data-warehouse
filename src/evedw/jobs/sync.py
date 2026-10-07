@@ -219,6 +219,17 @@ class SyncJob:
             date_to=self.date_to,
             newest_first=True,
         )
+        supported: list[SourceObject] = []
+        for obj in pending:
+            reason = self.dataset.unsupported_reason(obj.object_key)
+            if reason is None:
+                supported.append(obj)
+            else:
+                ctx.registry.mark(
+                    self.dataset.name, obj.object_key, ObjectStatus.SKIPPED, error=reason
+                )
+                log.info("skipping unsupported %s: %s", obj.object_key, reason)
+        pending = supported
         if self.offline:
             retained = [o for o in pending if self._has_raw(ctx, o)]
             if len(retained) < len(pending):

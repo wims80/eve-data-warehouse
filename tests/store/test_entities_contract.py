@@ -107,6 +107,27 @@ def test_composite_keys(entities: EntityStore) -> None:
     assert [r["record_id"] for r in found.to_pylist()] == [10, 11]
 
 
+def test_ids_iterate_live_entities_for_cursors(entities: EntityStore) -> None:
+    entities.upsert(
+        "characters",
+        characters(
+            {"character_id": 5, "corporation_id": 7},
+            {"character_id": 3, "corporation_id": 7},
+            {"character_id": 9, "corporation_id": 8, "deleted": True},
+            {"character_id": 1, "corporation_id": 8},
+        ),
+    )
+    assert entities.ids("characters") == [1, 3, 5, 9]
+    assert entities.ids("characters", live_only=True) == [1, 3, 5]
+    assert entities.ids("characters", live_only=True, after=1, limit=1) == [3]
+    assert entities.ids("characters", descending=True, after=5) == [3, 1]
+    assert entities.ids("characters", where={"corporation_id": 8}) == [1, 9]
+    assert entities.ids("characters", where={"corporation_id": 8}, live_only=True) == [1]
+    assert entities.ids("alliances") == []
+    with pytest.raises(KeyError):
+        entities.ids("characters", where={"no_such_column": 1})
+
+
 def test_missing_columns_and_unknown_tables_are_rejected(entities: EntityStore) -> None:
     with pytest.raises(ValueError):
         entities.upsert("characters", pa.table({"character_id": [1]}))

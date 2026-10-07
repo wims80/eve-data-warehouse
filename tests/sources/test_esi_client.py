@@ -190,6 +190,23 @@ def test_no_store_is_not_retained(fake: FakeEsi, client: EsiClient, cache: Memor
     assert not cache.entries
 
 
+def test_store_false_keeps_nothing_and_never_revalidates(
+    fake: FakeEsi, client: EsiClient, cache: MemoryCache
+) -> None:
+    fake.put("/characters/1/corporationhistory", [{"record_id": 1}], etag="h")
+    cache_before = dict(cache.entries)
+    first = client.get("/characters/1/corporationhistory", store=False)
+    second = client.get("/characters/1/corporationhistory", store=False)
+    assert first.body == second.body == [{"record_id": 1}]
+    assert not first.from_cache and not second.from_cache
+    assert cache.entries == cache_before
+    assert fake.hits["GET /characters/1/corporationhistory"] == 2
+    assert all("If-None-Match" not in r.headers for r in fake.requests)
+    fake.put("/characters/affiliation", [{"character_id": 2, "corporation_id": 3}])
+    client.post_ids("/characters/affiliation", [2], store=False)
+    assert cache.entries == cache_before
+
+
 def test_daily_budget_counts_requests_not_cache_hits(
     fake: FakeEsi, cache: MemoryCache, clock: FakeClock, policy_path: Path
 ) -> None:

@@ -2,7 +2,7 @@
 
 import json
 from collections import Counter
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -62,6 +62,9 @@ class FakeEsi:
         self.queues: dict[str, list[Canned]] = {}
         self.hits: Counter[str] = Counter()
         self.requests: list[httpx.Request] = []
+        self.handlers: dict[str, Callable[[httpx.Request], httpx.Response]] = {}
+        """Routes answered by a function of the request, e.g. a POST whose answer depends
+        on the ids in its body. Checked before the canned queues."""
         router.route(url__regex=rf"{base_url}/.*").mock(side_effect=self._handle)
 
     def put(
@@ -102,6 +105,9 @@ class FakeEsi:
         route = request.url.path
         self.hits[f"{request.method} {route}"] += 1
         self.requests.append(request)
+        handler = self.handlers.get(route)
+        if handler is not None:
+            return handler(request)
         queue = self.queues.get(route)
         if not queue:
             return httpx.Response(404, json={"error": "no such route in the fake"})

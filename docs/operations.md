@@ -44,8 +44,9 @@ imported is redone by the next sync. A cancelled run does not count for the
 schedule, so a restart picks its job up again straight away.
 
 What the scheduler does on its own (design §8): a sync of each dataset every
-6 h, a header sweep of every file weekly, the entity Parquet export daily,
-`verify` weekly. `entities:refresh` is scheduled only when
+6 h, a header sweep of every file weekly, a check for new entity backfill
+archives daily (all unseeded ones are imported), the entity Parquet export
+daily, `verify` weekly. `entities:refresh` is scheduled only when
 `EVEDW_ESI_CONTACT` is set to a real contact; leave it empty to keep the
 service off ESI entirely.
 
@@ -74,8 +75,8 @@ uv run evedw serve
 
 The first scheduled syncs carry no date range, so they perform the full
 backfill of both datasets, newest day first (design §4 has the sizes and
-times). To populate entities, seed from the latest EVE Ref backfill once:
-`uv run evedw entities seed latest`.
+times), and the scheduled `entities:seed all` imports every EVE Ref entity
+backfill archive. Nothing needs to be run by hand.
 
 ## Forcing a range
 
@@ -194,9 +195,28 @@ rebuild. Entity exports are rebuilt with `uv run evedw entities export`.
 The registry cannot be rebuilt from `raw/` alone: the file names hold the
 content hash but not the upstream etag or the expected counts. Back up
 `warehouse.duckdb` by copying it while the service is stopped. If it is lost
-anyway, `evedw migrate` and an online sync rebuild everything by
-downloading again, and the entity tables need a fresh
-`evedw entities seed latest`.
+anyway, `evedw migrate` and a service start rebuild everything by
+downloading again, entity backfills included; ESI-refreshed entity rows
+come back as the refresh queue cycles.
+
+## Entity refresh
+
+With `EVEDW_ESI_CONTACT` set, the service keeps characters, corporations and
+alliances current by itself (design §7.3): a daily alliance membership
+sweep, a weekly affiliation sweep over every live character, a change queue
+for what moved, and a crawl that fetches the history nobody fetched before,
+within `EVEDW_ESI_DAILY_BUDGET` (80,000 requests a day). Progress:
+
+```
+uv run evedw entities status    # row counts, queue per class, sweep state
+uv run evedw esi status         # requests and budget used today
+```
+
+The queue classes are `change` (a sweep saw it move), `active` (on recent
+killmails or in an alliance, details older than 30 days), `crawl` (history
+never fetched) and `idle` (settled). `crawl` shrinking day by day is the
+history filling in; `change` should stay short once the first affiliation
+cycle has caught up with what changed since the last backfill.
 
 ## ESI stops
 

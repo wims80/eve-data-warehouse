@@ -7,7 +7,7 @@ record's update time, ESI rows carry the request time, so ESI always wins over a
 
 import os
 import threading
-from collections.abc import Collection
+from collections.abc import Collection, Mapping
 from pathlib import Path
 
 import duckdb
@@ -93,6 +93,41 @@ class DuckDBEntityStore:
             finally:
                 self._con.unregister("wanted")
         return result.cast(schema)
+
+    def ids(
+        self,
+        table: str,
+        *,
+        live_only: bool = False,
+        where: Mapping[str, int] | None = None,
+        after: int | None = None,
+        descending: bool = False,
+        limit: int | None = None,
+    ) -> list[int]:
+        schema = _check_table(table)
+        column = ENTITY_ID[table]
+        clauses: list[str] = []
+        params: list[object] = []
+        if live_only and "deleted" in schema.names:
+            clauses.append("NOT deleted")
+        for name, value in (where or {}).items():
+            if name not in schema.names:
+                raise KeyError(f"{table} has no column {name!r}")
+            clauses.append(f"{name} = ?")
+            params.append(int(value))
+        if after is not None:
+            clauses.append(f"{column} {'<' if descending else '>'} ?")
+            params.append(int(after))
+        sql = f"SELECT DISTINCT {column} FROM {table}"
+        if clauses:
+            sql += " WHERE " + " AND ".join(clauses)
+        sql += f" ORDER BY {column} {'DESC' if descending else 'ASC'}"
+        if limit is not None:
+            sql += " LIMIT ?"
+            params.append(int(limit))
+        with self._lock:
+            rows = self._con.execute(sql, params).fetchall()
+        return [int(r[0]) for r in rows]
 
     def count(self, table: str) -> int:
         _check_table(table)

@@ -563,20 +563,65 @@ class DuckDBRegistry:
     def refresh_pop(self, *, limit: int, now: datetime) -> list[RefreshEntry]:
         with self._lock:
             rows = self._con.execute(
-                f"SELECT {_REFRESH_COLUMNS} FROM entity_refresh WHERE next_due_at <= ? "
-                "ORDER BY priority, last_refreshed_at NULLS FIRST, next_due_at, kind, entity_id "
-                "LIMIT ?",
+                f"SELECT {_REFRESH_COLUMNS} FROM ("
+                f"  SELECT {_REFRESH_COLUMNS}, row_number() OVER ("
+                "    PARTITION BY priority, kind "
+                "    ORDER BY last_refreshed_at NULLS FIRST, next_due_at, entity_id) AS turn "
+                "  FROM entity_refresh WHERE next_due_at <= ?"
+                ") ORDER BY priority, turn, next_due_at, kind LIMIT ?",
                 [_to_db(now), limit],
             ).fetchall()
         return [self._refresh(r) for r in rows]
 
-    def refreshed_since(self, since: datetime) -> set[tuple[str, int]]:
+    def refresh_filter(
+        self, kind: str, ids: Collection[int], *, refreshed_before: datetime | None = None
+    ) -> list[int]:
+        wanted = sorted({int(i) for i in ids})
+        if not wanted:
+            return []
+        stale = (
+            ""
+            if refreshed_before is None
+            else (" OR r.last_refreshed_at IS NULL OR r.last_refreshed_at < ?")
+        )
+        params: list[Any] = [kind] + (
+            [] if refreshed_before is None else [_to_db(refreshed_before)]
+        )
+        with self._lock:
+            self._con.register("wanted_ids", pa.table({"id": pa.array(wanted, pa.int64())}))
+            try:
+                rows = self._con.execute(
+                    "SELECT w.id FROM wanted_ids w LEFT JOIN entity_refresh r "
+                    "ON r.kind = ? AND r.entity_id = w.id "
+                    f"WHERE r.entity_id IS NULL{stale} ORDER BY w.id",
+                    params,
+                ).fetchall()
+            finally:
+                self._con.unregister("wanted_ids")
+        return [int(r[0]) for r in rows]
+
+    def refresh_counts(self, *, now: datetime) -> dict[int, tuple[int, int]]:
         with self._lock:
             rows = self._con.execute(
-                "SELECT kind, entity_id FROM entity_refresh WHERE last_refreshed_at >= ?",
-                [_to_db(since)],
+                "SELECT priority, count(*), count(*) FILTER (WHERE next_due_at <= ?) "
+                "FROM entity_refresh GROUP BY priority ORDER BY priority",
+                [_to_db(now)],
             ).fetchall()
-        return {(str(r[0]), int(r[1])) for r in rows}
+        return {int(r[0]): (int(r[1]), int(r[2])) for r in rows}
+
+    # -- sweep state ---------------------------------------------------------------------
+
+    def state_get(self, key: str) -> str | None:
+        with self._lock:
+            row = self._con.execute("SELECT value FROM sweep_state WHERE key = ?", [key]).fetchone()
+        return None if row is None else str(row[0])
+
+    def state_put(self, key: str, value: str, *, now: datetime) -> None:
+        with self._lock:
+            self._con.execute(
+                "INSERT OR REPLACE INTO sweep_state (key, value, updated_at) VALUES (?, ?, ?)",
+                [key, value, _to_db(now)],
+            )
 
     def refresh_update(self, entry: RefreshEntry) -> None:
         with self._lock:

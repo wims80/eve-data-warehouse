@@ -2,7 +2,7 @@
 
 from dataclasses import dataclass, field
 from datetime import date, datetime
-from enum import StrEnum
+from enum import IntEnum, StrEnum
 from typing import Any
 
 from evedw.domain.ids import RunId
@@ -17,6 +17,8 @@ class ObjectStatus(StrEnum):
     IMPORTED = "imported"
     FAILED = "failed"
     GONE = "gone"
+    SKIPPED = "skipped"
+    """Listed upstream, deliberately not imported: the dataset marks it unsupported."""
 
 
 PENDING_STATUSES: frozenset[ObjectStatus] = frozenset(
@@ -42,6 +44,19 @@ class RunStatus(StrEnum):
     @property
     def finished(self) -> bool:
         return self in (RunStatus.SUCCEEDED, RunStatus.FAILED, RunStatus.CANCELLED)
+
+
+class RefreshClass(IntEnum):
+    """Entity refresh queue priorities (design §7.3). Lower is served first."""
+
+    CHANGE = 0
+    """A sweep saw the entity change, or found an entity we do not have."""
+    ACTIVE = 1
+    """On recent killmails, or in an alliance, with details older than the interval."""
+    IDLE = 2
+    """Refreshed; not due until something queues it again."""
+    CRAWL = 3
+    """History never fetched from ESI; filled with whatever budget is left."""
 
 
 class Trigger(StrEnum):

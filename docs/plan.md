@@ -1,6 +1,6 @@
 # Implementation plan
 
-Status: M0 to M5 complete (2026-10-07). Next: M6, outside this repository.
+Status: M0 to M5 complete (2026-10-07). M6 (entity coverage) in progress.
 
 Milestones are ordered so that each one leaves a working, testable system.
 Do not start a milestone before the previous one's acceptance checks pass.
@@ -192,7 +192,36 @@ partition helpers out of the DuckDB package into `domain/schemas.py`. The
 market day reached revision 6), the ESI daily budget ran out in the evening
 and reset at midnight, and the service's memory stayed flat at 1.7 GB.
 
-## M6. Consumers migrate
+## M6. Entity coverage
+
+The warehouse is a general EVE dataset (design §1), so entity data must
+cover the whole population and stay current without an operator. Design
+§7.3 has the refresh design, decided 2026-10-07: 80,000 requests a day, the
+2024-05-31 backfill archive unsupported.
+
+Deliverables:
+
+- `Dataset.unsupported` and object status `skipped`; the 2024-05-31
+  archive listed.
+- Seed skips error placeholder records; `entities_backfill` parser_version
+  2, so all archives re-import from `raw/`.
+- Registry migration 003: `sweep_state`. Protocol additions
+  `state_get/state_put`, `refresh_filter`, `refresh_counts`,
+  `EntityStore.ids`; kinds take turns within a priority in `refresh_pop`.
+  Contract tests on both backends.
+- `EsiClient` requests with `store=False`.
+- `jobs/refresh.py`: alliance sweep, affiliation (recent and cycle) with
+  batch splitting, active populate, crawl feed, drain by class.
+- `evedw entities status` shows sweep state and queue counts per class.
+- Live run: first affiliation cycle and alliance sweep; record change
+  counts, crawl throughput and the first day's request mix in design §7.3.
+
+Acceptance: a corporation that changes alliance is current within a day and
+a character who changes corporation within the affiliation cycle, without
+anyone running a command; the crawl advances every day within the budget;
+`evedw entities status` shows all of it.
+
+## M7. Consumers migrate
 
 Not part of this repository. Valuation, membership reconstruction and reports
 move out of kat into their own applications reading the lake. Kat is retired

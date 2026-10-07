@@ -6,15 +6,17 @@ sessions live in [../CLAUDE.md](../CLAUDE.md).
 
 ## 1. Purpose and scope
 
-A local warehouse service that keeps three datasets current on a developer
-machine and delivers them to a handful of local applications.
+A local warehouse service that keeps a broad EVE Online dataset complete and
+current on a developer machine and delivers it to local applications. Raw
+EVE data is in scope; analysis built on it is not. Coverage aims at the
+whole population of a dataset, not at what happens to appear on killmails.
 
 In scope:
 
 - Killmail history, full EVE Ref history from 2007-12-05 to the latest closed
   UTC day.
 - Character, corporation and alliance history: identity plus employment and
-  alliance membership events.
+  alliance membership events, for every entity the warehouse knows of.
 - Market price history, EVE Ref daily market history for all regions.
 - Self-updating on a schedule, manual runs of the same jobs, a registry that
   records every source object imported and every revision of it, including
@@ -119,6 +121,25 @@ Facts below were measured on 2026-10-05 against live EVE Ref data.
   recently imported killmails, under a daily request budget.
 - A snapshot date is an observation horizon, not an event date. Every entity
   row records `observed_at` and `source`.
+- The archives are eve-kill.com database exports and differ by generation,
+  measured 2026-10-07. 2024-05-31 is a MongoDB export (newline-delimited,
+  `$oid`/`$date` wrappers, other field names) and is marked unsupported
+  (section 6). 2025-03-13 carries Mongo `_id`/`__v`. 2024-09-27 embeds whole
+  ESI responses (`error`, `body`, `headers`). Error placeholder records (an
+  `error` key or no name) are skipped. eve-kill fetched history only for
+  entities it cared about: after seeding 2024-09-27, 2025-03-13 and
+  2026-05-10, 1,433,725 of 17,970,116 live characters have employment
+  history and 97,738 of 978,705 corporations have alliance history. Older
+  snapshots added 261k employment and 166k alliance-history events.
+- ESI facts for the refresh, checked 2026-10-07 against the specification
+  and a two-request probe: `POST /characters/affiliation` takes 1 to 1,000
+  character ids and returns `character_id, corporation_id, alliance_id,
+  faction_id`; a deleted character comes back in Doomheim; one nonexistent
+  id fails the batch with `400 Invalid character ID`. `GET /alliances` lists
+  live alliance ids and `GET /alliances/{id}/corporations` an alliance's
+  members. Character history does not record the move to Doomheim. None of
+  these routes sends rate-limit bucket headers, so only the error limit and
+  our own pacing (at most 86,400 requests a day) bound them.
 
 ## 3. Architecture
 
@@ -277,7 +298,7 @@ operations, not SQL. Columns below are the logical model.
 | expected_count | from totals.json, null if absent |
 | discovered_at, last_seen_at | |
 | current_revision | revision number whose data is live in the lake, null if none |
-| status | `new`, `changed`, `fetching`, `fetched`, `importing`, `imported`, `failed`, `gone` |
+| status | `new`, `changed`, `fetching`, `fetched`, `importing`, `imported`, `failed`, `gone`, `skipped` |
 | last_error | |
 
 `source_revision`, one row per fetched content hash of an object:
@@ -305,6 +326,10 @@ operations, not SQL. Columns below are the logical model.
 
 `entity_refresh` queue: `kind, entity_id, priority, last_refreshed_at,
 next_due_at, etag, failures, last_error`.
+
+`sweep_state`: `key, value, updated_at`. Small JSON documents holding the
+refresh job's progress (alliance sweep position, affiliation cursor, crawl
+cursors), so a restart resumes a sweep instead of starting it again.
 
 `schema_version` for registry migrations.
 
@@ -341,6 +366,10 @@ verify     recount Parquet partitions against registry and totals, confirm
            every current revision's raw file exists and hashes correctly,
            report drift. Read-only.
 ```
+
+A dataset can name upstream objects it does not support, with the reason
+(`Dataset.unsupported`). Sync marks them `skipped` instead of fetching them;
+they stay listed in the registry and are reported, never retried.
 
 Properties this gives:
 
@@ -468,7 +497,7 @@ shares, tax rates, URLs, creator ids, `last_active`, `createdAt`,
 `achievement_score`, titles. They are not history and consumers that want
 them can call ESI.
 
-Seed job (`evedw entities seed [date|latest]`): the archive is a registry
+Seed job (`evedw entities seed [date|latest|all]`): the archive is a registry
 object of dataset `entities_backfill`, discovered from the HTML listing,
 fetched and retained like any other object, and imported by streaming the
 three members out of the tar into scratch, then reading each with DuckDB
@@ -478,27 +507,60 @@ rows so the 10 GB character file never has to fit in memory. The object's
 `observed_count` is the number of entity records (characters, corporations
 and alliances). Re-running the seed on an imported snapshot does nothing;
 `--force` re-imports it, which is a no-op for the data because of the upsert
-rule.
+rule. Error placeholder records are skipped (parser_version 2). `all`
+seeds every listed archive that is not imported yet, newest first; an older snapshot only adds rows the newer ones lack (history events,
+entities gone since), because the upsert never replaces a newer
+observation. The scheduler runs `entities:seed all` daily, so a new upstream
+backfill is imported without an operator.
 
-Refresh job (`evedw entities refresh [--budget N]`):
+Refresh job (`evedw entities refresh [--budget N]`). Change is detected in
+bulk, history is fetched only for what changed, and the rest of the budget
+completes history that was never fetched. One run is a slice that works
+through these steps in order until its budget is spent; progress lives in
+the registry's `sweep_state`, so a restart resumes where the slice stopped.
 
-1. Populate: distinct character, corporation and alliance ids from killmail
-   and attacker partitions of the last `EVEDW_ESI_RECENT_DAYS` (7) days are
-   pushed with priority 1 and due now, except ids refreshed within the last
-   day, whose ESI data is still as fresh as a request would return.
-2. Drain: pop due entries ordered by priority, never-refreshed first, then
-   longest ago refreshed, then earliest due. A character or corporation
-   costs up to two requests (entity plus history), an alliance one. The
-   loop stops before an entity that would exceed the daily budget
-   (`EVEDW_ESI_DAILY_BUDGET`, default 20,000) or the run's `--budget`.
-3. Per entity: conditional requests through the client; a 304 or a cache
-   hit writes nothing. Success sets `last_refreshed_at`, priority 2 and
-   `next_due_at = max(cache expiry, now + EVEDW_ESI_REFRESH_INTERVAL)`
-   (30 days). A 404/410 marks the stored row deleted with `source = 'esi'`
-   and parks the entry for a year. Other 4xx park the entry for a year with
-   the status recorded. Transient failures back off by hours, doubling per
-   failure up to a day. A 403 or 420 raises out of the job, which records
-   the run as failed; nothing else talks to ESI until `evedw esi resume`.
+1. Alliance sweep, every `EVEDW_ALLIANCE_SWEEP_INTERVAL` (daily).
+   `GET /alliances`, then `GET /alliances/{id}/corporations` per live
+   alliance. A corporation newly listed under an alliance gets that
+   `alliance_id` written at once and is queued as a change; a stored member
+   no longer listed is queued as a change without a write (it may have
+   switched to an alliance processed later). An alliance absent from the
+   list is marked deleted. Unknown alliances and corporations are queued as
+   changes. Alliances and member corporations whose details are older than
+   `EVEDW_ESI_REFRESH_INTERVAL` are queued as active.
+2. Affiliation, recent: once a day the characters on killmails of the last
+   `EVEDW_ESI_RECENT_DAYS` days, 1,000 per `POST /characters/affiliation`.
+3. Affiliation cycle: every live character in id order, 1,000 per request,
+   one pass per `EVEDW_AFFILIATION_CYCLE` (weekly), about 18,000 requests
+   swept as fast as the budget allows, then idle until the next cycle. Per
+   character: Doomheim marks it deleted; a different corporation writes the
+   new affiliation at once and queues a change; a different alliance or
+   faction only writes; an unknown character or corporation is queued as a
+   change. A `400` batch is split in halves until the invalid ids are
+   isolated; an invalid known character is marked deleted.
+4. Active: entities on killmails of the last `EVEDW_ESI_RECENT_DAYS` days
+   whose details are older than `EVEDW_ESI_REFRESH_INTERVAL` (30 days).
+5. Crawl feed: when fewer than a day of crawl entries is due, more are
+   queued. First every character and corporation that appears on any
+   killmail and has no queue entry, then every other live character and
+   corporation by id, highest first.
+6. Drain the queue. Priorities are classes: 0 change, 1 active, 3 crawl;
+   2 is a settled entry, idle until something queues it again. Within a
+   class kinds take turns, so corporations never wait behind characters.
+   A change or active entry fetches details and history (an alliance only
+   details); a crawl entry fetches history only, one request. Success sets
+   `last_refreshed_at`, priority 2 and a next-due time ten years out. A
+   404/410 marks the stored row deleted with `source = 'esi'`; other 4xx
+   park the entry for a year with the status recorded; transient failures
+   back off by hours, doubling per failure up to a day. A 403 or 420 raises
+   out of the job, which records the run as failed; nothing else talks to
+   ESI until `evedw esi resume`.
+
+The daily budget (`EVEDW_ESI_DAILY_BUDGET`, default 80,000) bounds all of
+it. Steps 1 to 4 need a few thousand requests a day plus the change rate;
+the crawl gets the rest, about 70,000 a day, which completes character
+history (16.5M characters, one request each) in roughly eight months.
+`evedw entities status` shows the sweep state and the queue per class.
 
 Export job (`evedw entities export`): `COPY` each table to
 `lake/entities/<table>.parquet.tmp`, fsync, replace. `evedw views` adds a
@@ -511,7 +573,8 @@ view per exported file.
 | `sync:killmails` | every 6 h | discover, fetch, import changed objects, newest first |
 | `sync:market_history` | every 6 h | same |
 | `sync:*` with sweep | weekly (`EVEDW_SWEEP_INTERVAL`) | same, but every file's headers are re-checked |
-| `entities:refresh` | continuous, paced by ESI policy | drain due refresh queue within budget |
+| `entities:refresh` | continuous, paced by ESI policy | sweeps, change queue, active refresh, history crawl (section 7.3) |
+| `entities:seed` all | daily (`EVEDW_SEED_INTERVAL`) | import any listed backfill archive not yet seeded |
 | `entities:export` | daily | write entity Parquet snapshots |
 | `verify` | weekly | read-only consistency report |
 
@@ -598,12 +661,12 @@ should read the lake directly (see `docs/consumers.md`).
 - `Registry`: `upsert_objects`, `mark`, `objects(status, dataset)`,
   `add_revision`, `promote(object, revision)`, `start_run`, `finish_run`,
   `runs`, `refresh_push`, `refresh_pop`, `refresh_update`,
-  `refreshed_since`.
+  `refresh_filter`, `refresh_counts`, `state_get`, `state_put`.
 - `Lake`: `write_partition(table, partition, arrow_table, metadata)`,
   `partitions(table)`, `read(table, date_from, date_to)`, `view_sql()`.
 - `EntityStore`: `upsert(table, arrow_table)` with the newer-observation
-  rule of section 7.3, `lookup(table, ids)`, `count(table)`,
-  `export_parquet(dir)`.
+  rule of section 7.3, `lookup(table, ids)`, `ids(table, ...)` for
+  cursors over live entities, `count(table)`, `export_parquet(dir)`.
 - `ResponseCache`: `get(key)`, `put(entry)`, `delete(key)`; the ESI client's
   body and validator store. In DuckDB it is the `esi_cache` table.
 - `Queries`: `names()`, `describe(name)`, `run(name, params) -> pyarrow.Table`
@@ -636,7 +699,12 @@ Binding for every ESI request made by this project, including ad hoc scripts.
   `ResponseCache`, keyed by base URL, method, route and body. A fresh entry
   is served without a request; an expired one is revalidated with
   `If-None-Match` or `If-Modified-Since`, and a 304 keeps the cached body and
-  takes the new expiry. `no-store` responses are never kept.
+  takes the new expiry. `no-store` responses are never kept. Requests the
+  warehouse does not repeat within their cache lifetime are sent with
+  `store=False` and keep nothing: affiliation batches, and entity details
+  and history fetched by the refresh, whose queue entry is then not due
+  again for at least a day. Otherwise the crawl alone would add millions
+  of cache rows.
 - Read both the per-bucket `X-RateLimit-Group/Limit/Remaining` headers and
   the legacy `X-ESI-Error-Limit-Remain/Reset` headers. Reserve bucket units
   before sending, pause a full window when a bucket is near exhaustion,
@@ -647,11 +715,14 @@ Binding for every ESI request made by this project, including ad hoc scripts.
 - A 420 or a 403 sets `stopped` with the reason; every later request raises
   until an operator runs `evedw esi resume`. Other 4xx are permanent for
   that request: raised to the caller, recorded on the entity, not retried.
-- A daily request budget (`EVEDW_ESI_DAILY_BUDGET`) counts requests sent,
+- A daily request budget (`EVEDW_ESI_DAILY_BUDGET`, default 80,000) counts requests sent,
   including revalidations and retries, not cache hits; it is kept in the
   policy file and resets by UTC day.
-- `POST /universe/names` batches at most 1,000 distinct positive IDs. A
-  rejected batch is an error for the caller, not split and retried.
+- `POST /universe/names` and `POST /characters/affiliation` batch at most
+  1,000 distinct positive IDs. The client raises a rejected batch to the
+  caller. The affiliation sweep alone splits a `400` batch in halves to
+  isolate invalid ids; every split request counts against the budget and
+  the error limit.
 - Tests mock ESI (`tests/fake_esi.py`). Live calls happen only in explicitly
   marked manual tests or operator-run commands.
 
@@ -676,7 +747,8 @@ Keys: `DATA_DIR`, `BIND`, `MIN_FREE_GB`, `ESI_CONTACT`, `ESI_DAILY_BUDGET`,
 `ESI_COMPATIBILITY_DATE`, `ESI_REFRESH_INTERVAL`, `ESI_RECENT_DAYS`,
 `EVEREF_BASE_URL`, `ESI_BASE_URL`, `SYNC_INTERVAL_KILLMAILS`,
 `SYNC_INTERVAL_MARKET`, `SWEEP_INTERVAL`, `REFRESH_INTERVAL`, `REFRESH_SLICE`,
-`EXPORT_INTERVAL`, `VERIFY_INTERVAL`, `HEAD_DAYS`, `LOG_LEVEL`.
+`EXPORT_INTERVAL`, `SEED_INTERVAL`, `ALLIANCE_SWEEP_INTERVAL`,
+`AFFILIATION_CYCLE`, `VERIFY_INTERVAL`, `HEAD_DAYS`, `LOG_LEVEL`.
 Intervals are seconds in the environment. Base URLs are overridable so tests
 can point at a local fixture server.
 

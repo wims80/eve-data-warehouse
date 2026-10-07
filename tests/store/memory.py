@@ -59,6 +59,7 @@ class MemoryRegistry:
         self._revisions: dict[ObjectId, list[SourceRevision]] = {}
         self._runs: dict[RunId, ImportRun] = {}
         self._refresh: dict[tuple[str, int], RefreshEntry] = {}
+        self._state: dict[str, str] = {}
 
     # -- schema ---------------------------------------------------------------------------
 
@@ -388,17 +389,22 @@ class MemoryRegistry:
         cutoff = _utc(now)
         with self._lock:
             due = [e for e in self._refresh.values() if e.next_due_at <= cutoff]
-        due.sort(
-            key=lambda e: (
-                e.priority,
-                e.last_refreshed_at is not None,
-                e.last_refreshed_at or datetime.min.replace(tzinfo=UTC),
-                e.next_due_at,
-                e.kind,
-                e.entity_id,
+        within: dict[tuple[int, str], list[RefreshEntry]] = {}
+        for entry in due:
+            within.setdefault((entry.priority, entry.kind), []).append(entry)
+        ranked: list[tuple[int, int, RefreshEntry]] = []
+        for (priority, _kind), entries in within.items():
+            entries.sort(
+                key=lambda e: (
+                    e.last_refreshed_at is not None,
+                    e.last_refreshed_at or datetime.min.replace(tzinfo=UTC),
+                    e.next_due_at,
+                    e.entity_id,
+                )
             )
-        )
-        return due[:limit]
+            ranked.extend((priority, turn, e) for turn, e in enumerate(entries))
+        ranked.sort(key=lambda item: (item[0], item[1], item[2].next_due_at, item[2].kind))
+        return [item[2] for item in ranked[:limit]]
 
     def refresh_update(self, entry: RefreshEntry) -> None:
         key = (entry.kind, entry.entity_id)
@@ -410,14 +416,40 @@ class MemoryRegistry:
                     last_refreshed_at=_utc_or_none(entry.last_refreshed_at),
                 )
 
-    def refreshed_since(self, since: datetime) -> set[tuple[str, int]]:
-        cutoff = _utc(since)
+    def refresh_filter(
+        self, kind: str, ids: Collection[int], *, refreshed_before: datetime | None = None
+    ) -> list[int]:
+        cutoff = None if refreshed_before is None else _utc(refreshed_before)
+        wanted: list[int] = []
         with self._lock:
-            return {
-                key
-                for key, e in self._refresh.items()
-                if e.last_refreshed_at is not None and e.last_refreshed_at >= cutoff
-            }
+            for entity_id in sorted({int(i) for i in ids}):
+                entry = self._refresh.get((kind, entity_id))
+                if entry is None or (
+                    cutoff is not None
+                    and (entry.last_refreshed_at is None or entry.last_refreshed_at < cutoff)
+                ):
+                    wanted.append(entity_id)
+        return wanted
+
+    def refresh_counts(self, *, now: datetime) -> dict[int, tuple[int, int]]:
+        cutoff = _utc(now)
+        counts: dict[int, tuple[int, int]] = {}
+        with self._lock:
+            for entry in self._refresh.values():
+                total, due = counts.get(entry.priority, (0, 0))
+                counts[entry.priority] = (total + 1, due + int(entry.next_due_at <= cutoff))
+        return dict(sorted(counts.items()))
+
+    # -- sweep state ---------------------------------------------------------------------
+
+    def state_get(self, key: str) -> str | None:
+        with self._lock:
+            return self._state.get(key)
+
+    def state_put(self, key: str, value: str, *, now: datetime) -> None:
+        _utc(now)
+        with self._lock:
+            self._state[key] = value
 
     # -- reporting -----------------------------------------------------------------------
 
@@ -488,6 +520,35 @@ class MemoryEntityStore:
         with self._lock:
             rows = [row for key, row in sorted(self._tables[table].items()) if key[0] in wanted]
         return pa.Table.from_pylist(rows, schema=schema)
+
+    def ids(
+        self,
+        table: str,
+        *,
+        live_only: bool = False,
+        where: Mapping[str, int] | None = None,
+        after: int | None = None,
+        descending: bool = False,
+        limit: int | None = None,
+    ) -> list[int]:
+        schema = _schema(table)
+        for name in where or {}:
+            if name not in schema.names:
+                raise KeyError(f"{table} has no column {name!r}")
+        with self._lock:
+            rows = list(self._tables[table].items())
+        found: set[int] = set()
+        for key, row in rows:
+            if live_only and row.get("deleted"):
+                continue
+            if any(row.get(name) != value for name, value in (where or {}).items()):
+                continue
+            entity_id = int(key[0])
+            if after is not None and (entity_id >= after if descending else entity_id <= after):
+                continue
+            found.add(entity_id)
+        ordered = sorted(found, reverse=descending)
+        return ordered if limit is None else ordered[:limit]
 
     def count(self, table: str) -> int:
         _schema(table)

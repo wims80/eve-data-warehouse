@@ -18,8 +18,9 @@ from evedw.config import Settings
 from evedw.domain.datasets import DATASETS, ENTITIES_BACKFILL, get_dataset
 from evedw.domain.ids import RunId
 from evedw.domain.registry import ImportRun, Trigger
-from evedw.jobs.entities import ExportJob, RefreshJob
+from evedw.jobs.entities import ExportJob
 from evedw.jobs.importers import importer_for
+from evedw.jobs.refresh import RefreshJob
 from evedw.jobs.runner import JobFn, JobOutcome, JobRunner, RunContext, WriterLock
 from evedw.jobs.sync import SyncJob
 from evedw.jobs.verify import VerifyJob
@@ -95,7 +96,7 @@ def _convert(name: str, kind: str, value: Any) -> Any:
         if isinstance(value, str) and value.isdigit():
             return int(value)
     elif kind == "snapshot":
-        if value == "latest":
+        if value in ("latest", "all"):
             return value
         return _convert(name, "date", value)
     elif kind == "dataset":
@@ -200,6 +201,8 @@ class JobCatalog:
                     self.lake,
                     recent_days=self.settings.esi_recent_days,
                     refresh_interval=self.settings.esi_refresh_interval,
+                    alliance_sweep_interval=self.settings.alliance_sweep_interval,
+                    affiliation_cycle=self.settings.affiliation_cycle,
                     budget=params["budget"],
                     populate=params["populate"],
                 )
@@ -228,10 +231,21 @@ class JobCatalog:
 
     def _seed(self, client: EveRefClient, params: Mapping[str, Any]) -> JobFn:
         """The seed resolves ``latest`` against the upstream listing when it runs, so the
-        run log records what was asked for and the log line what it resolved to."""
+        run log records what was asked for and the log line what it resolved to. ``all``
+        is an unranged sync of the backfill dataset: every listed archive that is not
+        imported yet, newest first. Older snapshots only fill gaps, because an entity
+        upsert never replaces a newer observation."""
 
         def job(ctx: RunContext) -> JobOutcome:
             snapshot = params["snapshot"]
+            if snapshot == "all":
+                return SyncJob(
+                    dataset=ENTITIES_BACKFILL,
+                    client=client,
+                    importer=importer_for(ENTITIES_BACKFILL, self.lake, entities=self.entities),
+                    force=params["force"],
+                    head_days=self.settings.head_days,
+                )(ctx)
             if snapshot == "latest":
                 listed = [
                     o.logical_date for o in client.discover(ENTITIES_BACKFILL, []) if o.logical_date

@@ -103,6 +103,10 @@ class DatasetsOut(BaseModel):
     datasets: list[DatasetOut]
     entities: dict[str, int]
     """Row count per entity table."""
+    refresh_queue: dict[str, dict[str, int]] = {}
+    """Entity refresh queue per class: entries and entries due now."""
+    refresh_state: dict[str, Any] = {}
+    """Entity refresh sweep progress, as the refresh job stores it."""
 
 
 class ObjectOut(BaseModel):

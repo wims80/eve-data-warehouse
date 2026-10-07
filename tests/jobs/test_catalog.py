@@ -25,6 +25,7 @@ def test_normalise_params_fills_defaults_and_parses() -> None:
         "sync:market_history", {"from": "2026-10-01", "to": date(2026, 10, 2)}
     )
     assert parsed["from"] == date(2026, 10, 1) and parsed["to"] == date(2026, 10, 2)
+    assert normalise_params("entities:seed", {"snapshot": "all"})["snapshot"] == "all"
     assert normalise_params("entities:seed", {"snapshot": "2026-05-10"})["snapshot"] == date(
         2026, 5, 10
     )
