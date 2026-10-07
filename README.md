@@ -16,6 +16,30 @@ uv run evedw status
 uv run evedw serve        # API on 127.0.0.1:8470 plus the scheduler
 ```
 
+To type `evedw` instead of `uv run evedw`, from any directory, install it as
+an editable tool and, for zsh, add tab completion:
+
+```sh
+uv tool install --editable .     # puts evedw in ~/.local/bin; code changes apply at once
+evedw --install-completion zsh   # then open a new shell
+```
+
+The installed command reads `.env` and `data/` from this checkout wherever it
+is run (or from `EVEDW_HOME` if set). Reinstall with `--reinstall` after
+dependencies change.
+
+To keep an eye on a running warehouse (all read-only, safe at any time):
+
+```sh
+evedw status             # datasets, object counts, recent runs
+evedw entities status    # entity row counts, refresh queue, sweep progress
+evedw esi status         # ESI pace, slowdowns, budget used today, stops
+evedw speed              # requests/min, budget outlook, time left (60 s window)
+```
+
+Recovery, rebuilds, manual jobs and what to do when ESI access is stopped are
+in `docs/operations.md`.
+
 While `evedw serve` runs, `evedw sync`, `evedw verify` and the `evedw entities`
 commands send their job to the service and follow the run. Consumers are
 described in `docs/consumers.md`.

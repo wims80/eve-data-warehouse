@@ -2,8 +2,10 @@
 
 How to run the warehouse and what to do when something goes wrong. Design
 decisions are in [design.md](design.md); reading the data is in
-[consumers.md](consumers.md). Commands run from the repository root, which
-is where `.env` and the default `data/` directory live.
+[consumers.md](consumers.md). `.env` and the default `data/` directory live
+in the repository root. `uv run evedw` works from inside the repository; an
+`evedw` installed as in the README works from any directory and reads the
+same `.env` and `data/` (design §13). The two are interchangeable below.
 
 ## Starting and stopping the service
 
@@ -210,7 +212,22 @@ within `EVEDW_ESI_DAILY_BUDGET` (300,000 requests a day). Progress:
 ```
 uv run evedw entities status    # row counts, queue per class, sweep state
 uv run evedw esi status         # requests and budget used today
+uv run evedw speed              # requests/min, budget outlook, cycle time left (60 s window)
+uv run evedw speed --seconds 300 --watch   # a report every 5 minutes until Ctrl-C
 ```
+
+The service schedules both entity jobs, so neither normally needs running
+by hand. `evedw entities seed [date|latest|all] [--force]` imports an EVE
+Ref backfill archive from `raw/` or upstream; the daily scheduled run is
+`all`, which imports any archive not seen yet, and `--force` re-imports one
+that was. `evedw entities refresh [--budget N] [--no-populate]` runs one
+refresh slice. Every request it sends counts against the daily budget and
+the ESI error limit just like a scheduled slice, on top of the schedule, so
+reach for it only without a service (a data dir being prepared, or the
+service stopped on purpose) or with a small `--budget` to test a change.
+`--no-populate` skips the sweeps and the crawl feed and only drains what is
+already queued. With a service running, both commands queue their job on it
+and follow the run.
 
 The queue classes are `change` (a sweep saw it move), `active` (on recent
 killmails or in an alliance, details older than 30 days), `crawl` (history
