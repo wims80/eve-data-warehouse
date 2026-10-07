@@ -48,7 +48,12 @@ def policy_path(tmp_path: Path) -> Path:
 
 
 def make_client(
-    cache: MemoryCache, clock: FakeClock, policy_path: Path, *, budget: int = 1000
+    cache: MemoryCache,
+    clock: FakeClock,
+    policy_path: Path,
+    *,
+    budget: int = 1000,
+    spacing: float = 1.0,
 ) -> EsiClient:
     return EsiClient(
         ESI_URL,
@@ -57,6 +62,7 @@ def make_client(
         cache=cache,
         policy_path=policy_path,
         daily_budget=budget,
+        spacing=spacing,
         client=httpx.Client(),
         sleep=clock.sleep,
         clock=clock.time,
@@ -120,6 +126,33 @@ def test_requests_are_spaced_one_second_apart(
     client.get("/alliances/2")
     assert clock.now - start >= 1
     assert client.policy.pauses == 1
+
+
+def test_pace_starts_gently_reaches_the_floor_and_slows_on_warnings(
+    fake: FakeEsi, cache: MemoryCache, clock: FakeClock, policy_path: Path
+) -> None:
+    client = make_client(cache, clock, policy_path, spacing=0.2)
+    fake.put("/alliances/1", {"name": "A"}, max_age=0)
+    # A fresh policy starts at one second and halves every calm five minutes.
+    client.get("/alliances/1")
+    assert client.policy.spacing == 0.5
+    for _ in range(2):
+        clock.now += 301
+        client.get("/alliances/1")
+    assert client.policy.spacing == 0.2
+    clock.slept.clear()
+    client.get("/alliances/1")
+    client.get("/alliances/1")
+    assert clock.slept == pytest.approx([0.2, 0.2], abs=1e-3)  # pyright: ignore[reportUnknownMemberType]
+
+    # Errors piling up in the legacy window: one doubling per minute, logged.
+    fake.put("/alliances/1", {"name": "A"}, max_age=0, headers={"X-ESI-Error-Limit-Remain": "80"})
+    for _ in range(5):
+        client.get("/alliances/1")
+    assert client.policy.spacing == 0.4
+    assert client.policy.slowdowns == 1
+    restored = make_client(cache, clock, policy_path, spacing=0.2)
+    assert restored.policy.spacing == 0.4
 
 
 def test_permanent_error_is_raised_and_not_cached(

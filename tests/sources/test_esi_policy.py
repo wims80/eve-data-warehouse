@@ -1,6 +1,6 @@
 """Policy arithmetic ported from kat's tests: every malformed or extreme header fails closed."""
 
-from evedw.sources.esi.policy import Policy, parse_limit, policy_route
+from evedw.sources.esi.policy import MAX_SPACING, Policy, parse_limit, policy_route
 
 
 def test_extreme_and_malformed_legacy_headers_do_not_bypass_cooldowns() -> None:
@@ -90,3 +90,40 @@ def test_helpers() -> None:
         "/characters/{id}/corporationhistory"
     )
     assert policy_route("/universe/names") == "/universe/names"
+
+
+def test_warning_signs_double_the_spacing_once_a_minute_up_to_the_ceiling() -> None:
+    policy = Policy(floor=0.2, spacing=0.2)
+    assert policy.observe("/r", 200, {"x-esi-error-limit-remain": "95"}, 1000.0) is None
+    assert policy.next_request == 1000.2
+    assert policy.observe("/r", 502, {}, 1001.0) == "HTTP 502"
+    assert policy.spacing == 0.4
+    assert policy.observe("/r", 200, {"x-esi-error-limit-remain": "85"}, 1030.0) is not None
+    assert policy.spacing == 0.4  # same minute
+    for minute in range(1, 6):
+        policy.warn(1001.0 + 60 * minute)
+    assert policy.spacing == MAX_SPACING
+    assert policy.slowdowns == 4
+    warning = policy.observe(
+        "/r", 200, {"x-ratelimit-limit": "150/15m", "x-ratelimit-remaining": "70"}, 1400.0
+    )
+    assert warning == "rate-limit bucket at 70 of 150"
+
+
+def test_calm_halves_the_spacing_back_to_the_floor() -> None:
+    policy = Policy(floor=0.2, spacing=0.8, last_warning=1000.0, paced_at=1000.0)
+    policy.observe("/r", 200, {}, 1200.0)
+    assert policy.spacing == 0.8
+    policy.observe("/r", 200, {}, 1300.0)
+    assert policy.spacing == 0.4
+    policy.observe("/r", 200, {}, 1400.0)
+    assert policy.spacing == 0.4
+    policy.observe("/r", 200, {}, 1600.0)
+    assert policy.spacing == 0.2
+    policy.observe("/r", 200, {}, 9000.0)
+    assert policy.spacing == 0.2
+    restored = Policy.from_dict(policy.to_dict())
+    assert (restored.spacing, restored.paced_at) == (0.2, 1600.0)
+    # A raised floor wins over a persisted faster spacing.
+    restored.floor = 1.0
+    assert restored.pace() == 1.0

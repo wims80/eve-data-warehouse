@@ -2,7 +2,11 @@
 
 Ported from kat's ``infrastructure/esi/policy.rs``. The state is small enough to be
 serialised to JSON after every request so a restart never forgets a cooldown. Times are
-Unix seconds (integers) because that is what the headers deal in.
+Unix seconds, integers where they come from headers; the request spacing is fractional.
+
+The pace adapts (design §11): requests start ``floor`` seconds apart, the spacing doubles
+up to ``MAX_SPACING`` when ESI shows a warning sign, and halves back towards the floor
+after ``CALM_FOR`` seconds without one.
 """
 
 from collections.abc import Mapping
@@ -22,6 +26,19 @@ RESERVE_PER_REQUEST = 5
 
 UNKNOWN_LIMIT_PAUSE = 3601
 """Pause when a rate-limit header has a shape we do not understand: fail closed."""
+
+ERROR_WARN = 90
+"""Below this many remaining errors in the legacy window, errors are piling up: slow down.
+The window allows 100."""
+
+MAX_SPACING = 2.0
+"""The slowest the pace adapts to, in seconds between requests."""
+
+SLOW_DOWN_EVERY = 60.0
+"""At most one doubling per legacy error window, so one bad minute is one step."""
+
+CALM_FOR = 300.0
+"""Seconds without a warning sign before the spacing halves back towards the floor."""
 
 
 def header(headers: Mapping[str, str], name: str) -> str | None:
@@ -107,8 +124,17 @@ class Bucket:
 class Policy:
     stopped: str | None = None
     """Why all ESI work is stopped, or ``None``. Cleared only by an operator."""
-    next_request: int = 0
+    next_request: float = 0
     blocked_until: int = 0
+    floor: float = 1.0
+    """Configured spacing between requests; not persisted, the client sets it."""
+    spacing: float = 1.0
+    """Current spacing: ``floor`` when calm, up to ``MAX_SPACING`` after warning signs."""
+    last_warning: float = 0
+    paced_at: float = 0
+    """When ``spacing`` last changed."""
+    slowed_at: float = 0
+    slowdowns: int = 0
     routes: dict[str, str] = field(default_factory=lambda: {})
     """Policy route -> rate-limit group, learned from ``X-RateLimit-Group``."""
     buckets: dict[str, Bucket] = field(default_factory=lambda: {})
@@ -126,6 +152,11 @@ class Policy:
             "stopped": self.stopped,
             "next_request": self.next_request,
             "blocked_until": self.blocked_until,
+            "spacing": self.spacing,
+            "last_warning": self.last_warning,
+            "paced_at": self.paced_at,
+            "slowed_at": self.slowed_at,
+            "slowdowns": self.slowdowns,
             "routes": dict(self.routes),
             "buckets": {k: v.to_dict() for k, v in self.buckets.items()},
             "requests": self.requests,
@@ -149,8 +180,13 @@ class Policy:
         budget_day = raw.get("budget_day")
         return cls(
             stopped=str(stopped) if stopped else None,
-            next_request=int(raw.get("next_request", 0)),
+            next_request=float(raw.get("next_request", 0)),
             blocked_until=int(raw.get("blocked_until", 0)),
+            spacing=float(raw.get("spacing", 1.0)),
+            last_warning=float(raw.get("last_warning", 0)),
+            paced_at=float(raw.get("paced_at", 0)),
+            slowed_at=float(raw.get("slowed_at", 0)),
+            slowdowns=int(raw.get("slowdowns", 0)),
             routes=routes,
             buckets=buckets,
             requests=int(raw.get("requests", 0)),
@@ -176,7 +212,7 @@ class Policy:
 
     # -- pacing --------------------------------------------------------------------------
 
-    def ready_at(self, route: str, now: int) -> int:
+    def ready_at(self, route: str, now: float) -> float:
         """Earliest time a request on ``route`` may be sent."""
         ready = max(now, self.next_request, self.blocked_until)
         group = self.routes.get(route)
@@ -185,9 +221,9 @@ class Policy:
             ready = max(ready, bucket.reset_at)
         return ready
 
-    def reserve(self, route: str, now: int) -> None:
+    def reserve(self, route: str, now: float) -> None:
         """Account for a request before sending it."""
-        self.next_request = now + 1
+        self.next_request = now + self.pace()
         group = self.routes.get(route)
         bucket = self.buckets.get(group) if group else None
         if bucket is None:
@@ -196,9 +232,39 @@ class Policy:
             bucket.remaining = bucket.limit
         bucket.remaining = max(0, bucket.remaining - RESERVE_PER_REQUEST)
 
-    def observe(self, route: str, status: int, headers: Mapping[str, str], now: int) -> None:
-        """Update cooldowns from a response. Every branch only extends ``blocked_until``."""
-        self.next_request = now + 1
+    def pace(self) -> float:
+        """Seconds between requests now; never below the floor."""
+        self.spacing = min(MAX_SPACING, max(self.floor, self.spacing))
+        return self.spacing
+
+    def warn(self, now: float) -> None:
+        """A warning sign: double the spacing, at most once per ``SLOW_DOWN_EVERY``."""
+        self.last_warning = now
+        if now - self.slowed_at >= SLOW_DOWN_EVERY and self.pace() < MAX_SPACING:
+            self.spacing = min(MAX_SPACING, self.spacing * 2)
+            self.paced_at = self.slowed_at = now
+            self.slowdowns += 1
+
+    def relax(self, now: float) -> None:
+        """No warning sign: after ``CALM_FOR`` quiet seconds, halve the spacing."""
+        if (
+            self.pace() > self.floor
+            and now - self.last_warning >= CALM_FOR
+            and now - self.paced_at >= CALM_FOR
+        ):
+            self.spacing = max(self.floor, self.spacing / 2)
+            self.paced_at = now
+
+    def observe(self, route: str, status: int, headers: Mapping[str, str], at: float) -> str | None:
+        """Update cooldowns and the pace from a response. Every branch only extends
+        ``blocked_until``. Returns the warning sign seen, if any."""
+        now = int(at)
+        warning = self._warning(status, headers)
+        if warning is None:
+            self.relax(at)
+        else:
+            self.warn(at)
+        self.next_request = at + self.pace()
 
         retry_after = header(headers, "retry-after")
         if retry_after is not None:
@@ -243,3 +309,19 @@ class Policy:
                 # Waiting a full window near exhaustion is conservative for floating buckets.
                 if remaining <= max(5, limit // 5):
                     self.blocked_until = max(self.blocked_until, now + window + 1)
+        return warning
+
+    @staticmethod
+    def _warning(status: int, headers: Mapping[str, str]) -> str | None:
+        """A sign that ESI is struggling or that we are using up an allowance."""
+        if status == 429 or status == 420 or status >= 500:
+            return f"HTTP {status}"
+        remain = number(headers, LEGACY_ERROR_REMAIN)
+        if remain is not None and remain < ERROR_WARN:
+            return f"{remain} errors left in the window"
+        bucket_remaining = number(headers, "x-ratelimit-remaining")
+        limit_header = header(headers, "x-ratelimit-limit")
+        parsed = parse_limit(limit_header) if limit_header is not None else None
+        if bucket_remaining is not None and parsed is not None and bucket_remaining * 2 < parsed[0]:
+            return f"rate-limit bucket at {bucket_remaining} of {parsed[0]}"
+        return None

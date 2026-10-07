@@ -134,6 +134,7 @@ class EsiClient:
         cache: ResponseCache,
         policy_path: Path,
         daily_budget: int,
+        spacing: float = 1.0,
         client: httpx.Client | None = None,
         attempts: int = 5,
         sleep: Callable[[float], None] = time.sleep,
@@ -152,6 +153,7 @@ class EsiClient:
         self._attempts = attempts
         self._sleep = sleep
         self._clock = clock
+        self._spacing = spacing
         self._policy = self._load_policy()
 
     def close(self) -> None:
@@ -173,7 +175,9 @@ class EsiClient:
         self._save_policy()
 
     def _load_policy(self) -> Policy:
-        return load_policy(self._policy_path)
+        policy = load_policy(self._policy_path)
+        policy.floor = self._spacing
+        return policy
 
     def _save_policy(self) -> None:
         save_policy(self._policy_path, self._policy)
@@ -247,11 +251,10 @@ class EsiClient:
                 headers["If-Modified-Since"] = cached.last_modified
         last_error: str = "no attempt made"
         for attempt in range(self._attempts):
-            self._wait_until(policy.ready_at(bucket_route, self._now()))
-            now = self._now()
+            self._wait_until(policy.ready_at(bucket_route, self._clock()))
             policy.requests += 1
             policy.retries += int(attempt > 0)
-            policy.reserve(bucket_route, now)
+            policy.reserve(bucket_route, self._clock())
             policy.charge(self._today())
             self._save_policy()
             try:
@@ -263,12 +266,17 @@ class EsiClient:
                 )
             except httpx.TransportError as exc:
                 last_error = f"{type(exc).__name__}: {exc}"
+                spacing = policy.spacing
+                policy.warn(self._clock())
+                self._log_pace(spacing, last_error)
                 self._back_off(attempt, route, last_error)
                 continue
             now = self._now()
             status = response.status_code
             response_headers = dict(response.headers)
-            policy.observe(bucket_route, status, response_headers, now)
+            spacing = policy.spacing
+            warning = policy.observe(bucket_route, status, response_headers, self._clock())
+            self._log_pace(spacing, warning)
             if status in STOP_STATUS:
                 policy.stopped = f"HTTP {status} on {route} at {now}"
                 self._save_policy()
@@ -323,7 +331,14 @@ class EsiClient:
 
     # -- helpers -------------------------------------------------------------------------
 
-    def _wait_until(self, deadline: int) -> None:
+    def _log_pace(self, before: float, reason: str | None) -> None:
+        after = self._policy.spacing
+        if after > before:
+            log.warning("ESI pace slowed to %.2fs between requests (%s)", after, reason)
+        elif after < before:
+            log.info("ESI pace back to %.2fs between requests", after)
+
+    def _wait_until(self, deadline: float) -> None:
         waited = False
         while True:
             remaining = deadline - self._clock()

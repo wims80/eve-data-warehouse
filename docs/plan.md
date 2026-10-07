@@ -1,8 +1,8 @@
 # Implementation plan
 
 Status: M0 to M5 complete (2026-10-07). M6 (entity coverage) code done, live
-acceptance in progress. M7 and M8 not started; each starts once the previous
-milestone is accepted.
+acceptance in progress. M7 (gentler EVE Ref traffic) and M8 (entity discovery
+and manual add) not started; each starts once the previous one is accepted.
 
 Milestones are ordered so that each one leaves a working, testable system.
 Do not start a milestone before the previous one's acceptance checks pass.
@@ -215,6 +215,9 @@ Deliverables:
 - `jobs/refresh.py`: alliance sweep, affiliation (recent and cycle) with
   batch splitting, active populate, crawl feed, drain by class.
 - `evedw entities status` shows sweep state and queue counts per class.
+- Adaptive ESI pace (decided 2026-10-07, design §11): 0.2 s spacing when
+  calm, doubling to 2 s on warning signs, logged and shown in `evedw esi
+  status`; daily budget 300,000; refresh slices of 5,000 every minute.
 - Live run: first affiliation cycle and alliance sweep; record change
   counts, crawl throughput and the first day's request mix in design §7.3.
 
@@ -257,32 +260,53 @@ that was unchanged since the previous sync and sends at most about 30 HEADs
 per dataset; a full day of scheduled syncs shows the reduced request count
 in the log; no 429 from EVE Ref.
 
-## M8. Manual entity add
+## M8. Entity discovery and manual add
 
 Not started. Starts once M7 is accepted.
 
-Characters that never appear on a killmail or in a backfill archive cannot
-be discovered (design §7.3), so an operator can add them by hand.
+ESI cannot enumerate characters, so a character that never appears on a
+killmail or in a backfill archive stays unknown. eve-kill.com, whose
+database exports are the EVE Ref backfills, has a public read-only JSON API
+(`https://eve-kill.com/api`, no auth, behind Cloudflare). Checked
+2026-10-07: `GET /characters` lists every character it knows, 21,055,422
+against our 20,835,778, with `character_id, name, corporation_id,
+alliance_id, faction_id, security_status, last_active`, up to 1,000 per page
+by ascending id with an `after` cursor; `GET /corporations/{id}/members` and
+`GET /alliances/{id}/members` page members the same way. Corporation history
+comes only per character, so it does not replace the ESI crawl. No rate
+limit or usage terms are published; we pace ourselves as with ESI. EveWho's
+API (500 per page, 10 requests per 30 s) was considered and is not used
+unless eve-kill falls short. DOTLAN has no API and stays out.
 
 Deliverables:
 
-- `evedw entities add character <id-or-name>...` and the job
-  `entities:add` (`POST /jobs/entities:add`). Names resolve through
-  `POST /universe/ids`; the entities are refreshed in full at once, not
-  queued behind the crawl. Once stored they are covered by the affiliation
-  cycle like any other character.
+- Design §1 amended: documented third-party APIs (eve-kill) are allowed as
+  discovery sources; scraping stays out. ESI remains the source of truth:
+  anything eve-kill names is refreshed from ESI before it is stored.
+- `sources/evekill.py`: client with our User-Agent and contact, one request
+  in flight, paced, 429 and `Retry-After` handled like EVE Ref.
+- Discovery job, scheduled daily: walk `GET /characters` past the highest
+  id seen (kept in `sweep_state`); unknown characters, and unknown
+  corporations and alliances they name, go on the refresh queue as changes.
+- One-time full walk of the character list (about 21,000 requests) to find
+  characters below that id which the backfills missed; resumable.
+- `evedw entities add character <id-or-name>...` and the job `entities:add`
+  (`POST /jobs/entities:add`). Names resolve through ESI `POST
+  /universe/ids`; the characters are refreshed in full at once.
 - `evedw entities add corporation <id-or-name>... [--members]`: details and
-  alliance history at once. `--members` covers the members the warehouse
-  knows: characters whose stored corporation is that one, and characters
-  whose employment history includes it; they get an affiliation check now
-  and a change-class refresh. The full member list needs an authenticated
-  member character and is out of scope, by decision (2026-10-07).
-- Tests against the fake ESI; design §7.3 and §9 amended.
+  alliance history at once; `--members` takes the member list from
+  eve-kill and refreshes every member we did not have, plus the known
+  members in our own tables.
+- `evedw entities status` shows discovery progress; tests against a fake
+  eve-kill; design §7.3, §9 and §13 amended.
 
-Acceptance: adding a character by name that the warehouse did not have
-stores its details and employment history in one run; adding a corporation
-with `--members` refreshes it and queues its known members; both work from
-the CLI with the service running and without it.
+Acceptance: the daily discovery run finds characters created since the last
+run without anyone running a command; the full walk completes and reports
+how many unknown characters it found; adding a character by name that the
+warehouse did not have stores its details and employment history in one
+run; adding a corporation with `--members` stores members eve-kill lists
+that we did not have; everything works from the CLI with the service running
+and without it.
 
 ## M9. Consumers migrate
 

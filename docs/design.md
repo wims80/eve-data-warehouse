@@ -566,10 +566,14 @@ the registry's `sweep_state`, so a restart resumes where the slice stopped.
    out of the job, which records the run as failed; nothing else talks to
    ESI until `evedw esi resume`.
 
-The daily budget (`EVEDW_ESI_DAILY_BUDGET`, default 80,000) bounds all of
+The daily budget (`EVEDW_ESI_DAILY_BUDGET`, default 300,000) bounds all of
 it. Steps 1 to 4 need a few thousand requests a day plus the change rate;
-the crawl gets the rest, about 70,000 a day, which completes character
-history (16.5M characters, one request each) in roughly eight months.
+the crawl gets the rest. At the calm pace (section 11) the response time,
+not the budget, is usually the limit: one request in flight with 0.2 s
+spacing sends about 200,000 to 290,000 a day, which completes character
+history (16.5M characters, one request each) in two to three months. The
+budget was 80,000 (about eight months) until the adaptive pace replaced the
+fixed one-second spacing on 2026-10-07.
 `evedw entities status` shows the sweep state and the queue per class.
 
 Export job (`evedw entities export`): `COPY` each table to
@@ -604,8 +608,8 @@ except the sweeps and `verify`, which wait one interval. No third-party
 scheduler.
 
 `entities:refresh` is "continuous" as slices: every `EVEDW_REFRESH_INTERVAL`
-(5 min) a refresh run may send at most `EVEDW_REFRESH_SLICE` (1,500) requests,
-about 25 minutes at one request a second, then yields so a sync is never
+(1 min) a refresh run may send at most `EVEDW_REFRESH_SLICE` (5,000) requests,
+about 20 to 30 minutes at the calm pace, then yields so a sync is never
 blocked for hours by a long drain. A queued scheduled slice also lets any
 other queued run start before it, so a triggered backfill does not wait
 behind refresh work; a manually triggered refresh keeps its place. It is not scheduled at all while
@@ -697,9 +701,23 @@ normaliser. These are per-backend files by design.
 
 Binding for every ESI request made by this project, including ad hoc scripts.
 
-- One request in flight, at least one second between requests, five attempts
-  for transient failures (transport errors, 408, 429, 5xx) with exponential
-  backoff and jitter. Every request goes through `EsiClient._request`.
+- One request in flight, five attempts for transient failures (transport
+  errors, 408, 429, 5xx) with exponential backoff and jitter. Every request
+  goes through `EsiClient._request`.
+- The pace adapts (decided 2026-10-07). CCP publishes no request-rate cap
+  for the routes we use (none sends `X-RateLimit-Group`); what gets an
+  application banned is ignoring the error limit or getting around the cache
+  (developers.eveonline.com, checked 2026-10-07). So the next request waits
+  `EVEDW_ESI_SPACING` (0.2 s) after the previous response when calm, which
+  with one request in flight is at most 5 a second. A warning sign doubles
+  the spacing, at most once a minute, up to 2 s: a 429, 420 or 5xx, a
+  transport error, fewer than 90 of the 100 legacy errors left in the
+  window, or a rate-limit bucket below half. After 5 quiet minutes the
+  spacing halves back towards the floor. Every change is logged (`ESI pace
+  slowed to ...` at warning level), counted in `slowdowns` and shown by
+  `evedw esi status`; spacing and timers live in `policy.json`, so a
+  restart keeps a slowed pace. A fresh policy starts at 1 s and ramps
+  down.
 - Send `User-Agent` with project name, version and `EVEDW_ESI_CONTACT`.
   Send `X-Compatibility-Date`, pinned in `config.py` (2026-08-18, verified
   2026-10-05 against `/meta/openapi.json?compatibility_date=`). Check the
@@ -725,7 +743,8 @@ Binding for every ESI request made by this project, including ad hoc scripts.
 - A 420 or a 403 sets `stopped` with the reason; every later request raises
   until an operator runs `evedw esi resume`. Other 4xx are permanent for
   that request: raised to the caller, recorded on the entity, not retried.
-- A daily request budget (`EVEDW_ESI_DAILY_BUDGET`, default 80,000) counts requests sent,
+- A daily request budget (`EVEDW_ESI_DAILY_BUDGET`, default 300,000, raised
+  from 80,000 with the adaptive pace on 2026-10-07) counts requests sent,
   including revalidations and retries, not cache hits; it is kept in the
   policy file and resets by UTC day.
 - `POST /universe/names` and `POST /characters/affiliation` batch at most
@@ -736,8 +755,10 @@ Binding for every ESI request made by this project, including ad hoc scripts.
 - ESI's error limit is 100 non-2xx/3xx responses a minute on routes
   without bucket limits; past it every route answers 420, and CCP warns
   that ignoring it can get an application banned (checked 2026-10-07).
-  Pacing keeps us under 60 requests a minute, so the limit cannot be
-  reached, but avoidable errors are still avoided: a refresh slice counts
+  At 5 requests a second the limit could be reached in 20 seconds of
+  errors, so three guards stack: the pace slows from the tenth error in a
+  window, every request pauses until the window resets when 20 or fewer
+  remain, and a refresh slice counts
   its error responses, logs them with its batch splits, and ends early at
   100. It checks the cap only after saving progress, so a failing request
   is never sent again because a slice stopped halfway.
@@ -761,7 +782,7 @@ Output is a text table or JSON. It never writes.
 ## 13. Configuration
 
 `pydantic-settings`, prefix `EVEDW_`, loaded from environment and `.env`.
-Keys: `DATA_DIR`, `BIND`, `MIN_FREE_GB`, `ESI_CONTACT`, `ESI_DAILY_BUDGET`,
+Keys: `DATA_DIR`, `BIND`, `MIN_FREE_GB`, `ESI_CONTACT`, `ESI_DAILY_BUDGET`, `ESI_SPACING`,
 `ESI_COMPATIBILITY_DATE`, `ESI_REFRESH_INTERVAL`, `ESI_RECENT_DAYS`,
 `EVEREF_BASE_URL`, `ESI_BASE_URL`, `SYNC_INTERVAL_KILLMAILS`,
 `SYNC_INTERVAL_MARKET`, `SWEEP_INTERVAL`, `REFRESH_INTERVAL`, `REFRESH_SLICE`,

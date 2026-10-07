@@ -205,7 +205,7 @@ With `EVEDW_ESI_CONTACT` set, the service keeps characters, corporations and
 alliances current by itself (design §7.3): a daily alliance membership
 sweep, a weekly affiliation sweep over every live character, a change queue
 for what moved, and a crawl that fetches the history nobody fetched before,
-within `EVEDW_ESI_DAILY_BUDGET` (80,000 requests a day). Progress:
+within `EVEDW_ESI_DAILY_BUDGET` (300,000 requests a day). Progress:
 
 ```
 uv run evedw entities status    # row counts, queue per class, sweep state
@@ -217,6 +217,22 @@ killmails or in an alliance, details older than 30 days), `crawl` (history
 never fetched) and `idle` (settled). `crawl` shrinking day by day is the
 history filling in; `change` should stay short once the first affiliation
 cycle has caught up with what changed since the last backfill.
+
+## ESI pace and error rates
+
+Requests go out 0.2 s apart when calm (`EVEDW_ESI_SPACING`). Warning signs
+(errors piling up in ESI's error window, 429, 5xx, timeouts) double the
+spacing up to 2 s; five quiet minutes halve it again (design §11). To see
+whether that is happening:
+
+```
+uv run evedw esi status                         # current pace and slowdown count
+grep -E "ESI pace|ESI errors|HTTP 4[0-9][0-9]" data/serve.log | tail
+```
+
+An occasional slowdown is the policy doing its job. Repeated slowdowns, or
+a refresh slice ending early on `100 ESI errors`, mean something is sending
+bad requests: stop the service and find it before raising the pace again.
 
 ## ESI stops
 

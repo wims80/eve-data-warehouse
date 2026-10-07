@@ -165,6 +165,7 @@ class JobCatalog:
             cache=open_response_cache(settings),
             policy_path=settings.esi_policy_path,
             daily_budget=settings.esi_daily_budget,
+            spacing=settings.esi_spacing,
         )
 
     @contextmanager

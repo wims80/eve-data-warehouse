@@ -16,7 +16,9 @@ class Settings(BaseSettings):
     store_backend: str = "duckdb"
 
     esi_contact: str | None = None
-    esi_daily_budget: int = 80_000
+    esi_daily_budget: int = 300_000
+    esi_spacing: float = 0.2
+    """Seconds between ESI requests when calm; warning signs slow it to 2 s (design §11)."""
     # Latest date listed by https://esi.evetech.net/meta/compatibility-dates on 2026-10-05.
     # Re-check the endpoint specification when changing it (design §11).
     esi_compatibility_date: str = "2026-08-18"
@@ -31,17 +33,17 @@ class Settings(BaseSettings):
     sync_interval_killmails: timedelta = Field(default=timedelta(hours=6))
     sync_interval_market: timedelta = Field(default=timedelta(hours=6))
     sweep_interval: timedelta = Field(default=timedelta(days=7))
-    refresh_interval: timedelta = Field(default=timedelta(minutes=5))
+    refresh_interval: timedelta = Field(default=timedelta(minutes=1))
     """Pause between scheduled ``entities:refresh`` slices."""
-    refresh_slice: int = 1_500
+    refresh_slice: int = 5_000
     """Requests one scheduled refresh slice may send before yielding to other jobs."""
     export_interval: timedelta = Field(default=timedelta(days=1))
     seed_interval: timedelta = Field(default=timedelta(days=1))
+    """How often the backfill listing is checked for archives not yet seeded."""
     alliance_sweep_interval: timedelta = Field(default=timedelta(days=1))
     """How often every live alliance's member corporations are listed."""
     affiliation_cycle: timedelta = Field(default=timedelta(days=7))
     """How often every live character's corporation is checked, 1,000 per request."""
-    """How often the backfill listing is checked for archives not yet seeded."""
     verify_interval: timedelta = Field(default=timedelta(days=7))
     head_days: int = 120
     """Days back from today whose file headers are re-checked on every sync."""

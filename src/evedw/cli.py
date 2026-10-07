@@ -548,6 +548,10 @@ def esi_status(ctx: typer.Context) -> None:
     blocked = policy.blocked_until - now
     print(f"blocked        {f'{blocked}s' if blocked > 0 else 'no'}")
     print(
+        f"pace           {max(policy.spacing, settings.esi_spacing):.2f}s between requests "
+        f"(calm {settings.esi_spacing:.2f}s), {policy.slowdowns} slowdowns"
+    )
+    print(
         f"budget         {policy.budget_used} of {settings.esi_daily_budget} used "
         f"on {policy.budget_day or 'no day yet'}"
     )
