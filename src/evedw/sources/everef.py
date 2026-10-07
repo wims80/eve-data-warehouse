@@ -14,7 +14,7 @@ import time
 from collections.abc import Callable, Iterable
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, replace
-from datetime import datetime
+from datetime import UTC, datetime
 from html.parser import HTMLParser
 from pathlib import Path
 from typing import Any
@@ -29,6 +29,10 @@ from evedw.domain.registry import DiscoveredObject
 log = logging.getLogger(__name__)
 
 RETRY_STATUS = frozenset({408, 429, 500, 502, 503, 504})
+RATE_LIMITED_WAIT = 30.0
+"""Least wait after a 429 without a usable ``Retry-After``, doubled per attempt."""
+CONCURRENCY = 2
+"""Requests in flight at once. EVE Ref's download guide uses ``rclone --checkers 2``."""
 
 
 class UpstreamChangedError(RuntimeError):
@@ -40,7 +44,23 @@ class DownloadError(RuntimeError):
 
 
 class _Retryable(Exception):
-    pass
+    def __init__(self, message: str, *, retry_after: float | None = None) -> None:
+        super().__init__(message)
+        self.retry_after = retry_after
+
+
+def _retryable(response: httpx.Response) -> _Retryable:
+    retry_after: float | None = None
+    if response.status_code == 429:
+        header = response.headers.get("Retry-After")
+        if header and header.strip().isdigit():
+            retry_after = float(header.strip())
+        else:
+            when = parse_http_date(header)
+            if when is not None:
+                retry_after = max(0.0, (when - datetime.now(UTC)).total_seconds())
+        retry_after = max(retry_after or 0.0, RATE_LIMITED_WAIT)
+    return _Retryable(f"HTTP {response.status_code}", retry_after=retry_after)
 
 
 @dataclass(frozen=True, slots=True)
@@ -288,7 +308,7 @@ class EveRefClient:
         return found
 
     def refresh_headers(
-        self, objects: Iterable[DiscoveredObject], *, workers: int = 8
+        self, objects: Iterable[DiscoveredObject], *, workers: int = CONCURRENCY
     ) -> list[DiscoveredObject]:
         """Replace etag, size and last_modified with what a HEAD of each file reports now.
 
@@ -301,7 +321,13 @@ class EveRefClient:
             return []
 
         def refresh(obj: DiscoveredObject) -> DiscoveredObject:
-            response = self._request("HEAD", obj.url)
+            try:
+                response = self._request("HEAD", obj.url)
+            except DownloadError as exc:
+                # One unreachable file must not fail the whole discovery; the download
+                # checks the served etag anyway, and the next sync checks it again.
+                log.warning("HEAD failed, keeping index metadata: %s", exc)
+                return obj
             if response is None:
                 log.warning("HEAD %s returned 404; keeping index metadata", obj.url)
                 return obj
@@ -368,7 +394,7 @@ class EveRefClient:
         written = 0
         with self._client.stream("GET", url) as response:
             if response.status_code in RETRY_STATUS:
-                raise _Retryable(f"HTTP {response.status_code}")
+                raise _retryable(response)
             response.raise_for_status()
             served_etag = normalize_etag(response.headers.get("ETag"))
             if expected_etag and served_etag and served_etag != expected_etag:
@@ -416,7 +442,7 @@ class EveRefClient:
                 if response.status_code == 404:
                     return None
                 if response.status_code in RETRY_STATUS:
-                    raise _Retryable(f"HTTP {response.status_code}")
+                    raise _retryable(response)
                 response.raise_for_status()
                 return response
             except (httpx.TransportError, _Retryable) as exc:
@@ -428,6 +454,9 @@ class EveRefClient:
         if attempt + 1 >= self._attempts:
             return
         delay = self._backoff * (2**attempt) + random.uniform(0, self._backoff)
+        if isinstance(exc, _Retryable) and exc.retry_after is not None:
+            # Rate limited: wait at least what the server asks, longer on each attempt.
+            delay = max(delay, exc.retry_after * (2**attempt))
         log.warning(
             "retrying %s after %s (attempt %d, sleeping %.1fs)", url, exc, attempt + 1, delay
         )

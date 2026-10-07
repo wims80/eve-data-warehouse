@@ -346,8 +346,13 @@ discover   fetch per-year index.json for the object listing, then HEAD a
            (it is about to be downloaded), every object whose index
            entry differs from the registry, every object younger than
            `EVEDW_HEAD_DAYS` (default 120), and on a sweep every object.
-           HEADs run eight at a time; a full killmail sweep is about 7,000
-           requests. Then compare with source_object: new or different ->
+           HEADs run two at a time, as EVE Ref's download guide does
+           (`rclone --checkers 2`); a full killmail sweep is about 7,000
+           requests. A 429 waits for `Retry-After`, at least 30 seconds,
+           doubling per attempt. A file whose HEAD still fails keeps its
+           index metadata for this run, so one file cannot fail discovery;
+           measured 2026-10-07, eight concurrent HEADs drew 429s from EVE
+           Ref and aborted a killmail sync. Then compare with source_object: new or different ->
            status `changed`. `last_modified` compares at whole seconds,
            because the index carries milliseconds and HTTP dates do not.
            Entries that vanished -> `gone` (data stays). Refresh
@@ -538,8 +543,11 @@ the registry's `sweep_state`, so a restart resumes where the slice stopped.
    character: Doomheim marks it deleted; a different corporation writes the
    new affiliation at once and queues a change; a different alliance or
    faction only writes; an unknown character or corporation is queued as a
-   change. A `400` batch is split in halves until the invalid ids are
-   isolated; an invalid known character is marked deleted.
+   change. A `400` batch is retried in tenths until the invalid ids are
+   isolated, about four errors per invalid id in a batch of 1,000 (halving
+   cost about ten); an invalid known character is marked deleted, so it is
+   never sent again. Measured 2026-10-07: invalid ids cluster among the
+   newest character ids (above 2.1 billion).
 4. Active: entities on killmails of the last `EVEDW_ESI_RECENT_DAYS` days
    whose details are older than `EVEDW_ESI_REFRESH_INTERVAL` (30 days).
 5. Crawl feed: when fewer than a day of crawl entries is due, more are
@@ -722,9 +730,17 @@ Binding for every ESI request made by this project, including ad hoc scripts.
   policy file and resets by UTC day.
 - `POST /universe/names` and `POST /characters/affiliation` batch at most
   1,000 distinct positive IDs. The client raises a rejected batch to the
-  caller. The affiliation sweep alone splits a `400` batch in halves to
+  caller. The affiliation sweep alone retries a `400` batch in tenths to
   isolate invalid ids; every split request counts against the budget and
   the error limit.
+- ESI's error limit is 100 non-2xx/3xx responses a minute on routes
+  without bucket limits; past it every route answers 420, and CCP warns
+  that ignoring it can get an application banned (checked 2026-10-07).
+  Pacing keeps us under 60 requests a minute, so the limit cannot be
+  reached, but avoidable errors are still avoided: a refresh slice counts
+  its error responses, logs them with its batch splits, and ends early at
+  100. It checks the cap only after saving progress, so a failing request
+  is never sent again because a slice stopped halfway.
 - Tests mock ESI (`tests/fake_esi.py`). Live calls happen only in explicitly
   marked manual tests or operator-run commands.
 

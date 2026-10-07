@@ -1,7 +1,8 @@
 # Implementation plan
 
 Status: M0 to M5 complete (2026-10-07). M6 (entity coverage) code done, live
-acceptance in progress. M7 not started; it starts once M6 is accepted.
+acceptance in progress. M7 and M8 not started; each starts once the previous
+milestone is accepted.
 
 Milestones are ordered so that each one leaves a working, testable system.
 Do not start a milestone before the previous one's acceptance checks pass.
@@ -224,9 +225,41 @@ who changed corporation is queued as a change; the crawl has refreshed its
 first entities within the budget; `evedw entities status` shows all of it;
 change counts and the request mix are recorded in design §7.3.
 
-## M7. Manual entity add
+## M7. Gentler EVE Ref traffic
 
 Not started. Starts once M6 is accepted.
+
+EVE Ref's download guide asks clients to use `etag`, `last-modified` and
+`content-length` to avoid downloading the same data twice, and uses two
+concurrent requests. On 2026-10-07 eight concurrent HEADs drew 429s from
+its Cloudflare front and aborted a killmail sync; two concurrent requests,
+`Retry-After` handling and a per-file HEAD fallback were fixed in M6. What
+remains is volume: every sync downloads every year's `index.json` (20 for
+killmails, 24 for market history, about 117 KB each for a killmail year)
+and `totals.json` in full although most never change, and HEADs every file
+younger than 120 days, about 1,200 HEADs a day across both datasets.
+
+Deliverables:
+
+- Conditional GETs for `index.json`, `totals.json` and the backfill
+  listing: the last body and its `etag`/`last-modified` are kept in the
+  store, a `304` reuses the body. EVE Ref serves both validators
+  (checked 2026-10-07). Discovery still reads every year's index, as the
+  invariant requires; it just stops downloading the unchanged ones.
+- `EVEDW_HEAD_DAYS` default 120 -> 30. Rewrites of older days are caught by
+  the weekly sweep, which stays.
+- Per-sync counts of index requests answered `304`, HEADs and downloads in
+  the sync log line, so EVE Ref traffic is visible.
+- Tests against the fake EVE Ref; design §6 and §13 amended.
+
+Acceptance: a sync with nothing changed upstream downloads no index body
+that was unchanged since the previous sync and sends at most about 30 HEADs
+per dataset; a full day of scheduled syncs shows the reduced request count
+in the log; no 429 from EVE Ref.
+
+## M8. Manual entity add
+
+Not started. Starts once M7 is accepted.
 
 Characters that never appear on a killmail or in a backfill archive cannot
 be discovered (design §7.3), so an operator can add them by hand.
@@ -251,7 +284,7 @@ stores its details and employment history in one run; adding a corporation
 with `--members` refreshes it and queues its known members; both work from
 the CLI with the service running and without it.
 
-## M8. Consumers migrate
+## M9. Consumers migrate
 
 Not part of this repository. Valuation, membership reconstruction and reports
 move out of kat into their own applications reading the lake. Kat is retired

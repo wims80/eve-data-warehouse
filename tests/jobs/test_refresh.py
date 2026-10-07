@@ -8,6 +8,7 @@ import httpx
 import pyarrow as pa
 import pytest
 
+import evedw.jobs.refresh as refresh_module
 from evedw.domain.registry import RefreshClass, RefreshEntry, RunStatus, Trigger
 from evedw.domain.schemas import (
     ALLIANCES,
@@ -474,8 +475,8 @@ def test_affiliation_cycle_writes_changes_splits_bad_batches_and_finishes(
     )
     refresh = job(client, entities, env)
     refresh.affiliation_cycle_step(env.registry, cancel=lambda: None)
-    # One bad id fails its batch; halves are retried until it stands alone.
-    assert seen == [[1, 2, 3, 4, 5, 7], [1, 2, 3], [4, 5, 7], [4], [5, 7], [5], [7]]
+    # One bad id fails its batch; tenths are retried until it stands alone.
+    assert seen == [[1, 2, 3, 4, 5, 7], [1], [2], [3], [4], [5], [7]]
 
     rows = {r["character_id"]: r for r in entities.lookup("characters", range(1, 8)).to_pylist()}
     assert rows[1]["source"] == "everef_backfill:abc"  # nothing changed, nothing written
@@ -597,3 +598,47 @@ def test_crawl_is_not_fed_while_a_day_of_it_is_due(
     refresh = job(client, entities, env, crawl_low_water=1)
     refresh.feed_crawl(env.registry)
     assert ("character", 1) not in queue(env.registry)
+
+
+def test_tenths_isolate_an_invalid_id_with_few_errors(
+    env: SyncEnv, entities: EntityStore, esi: tuple[FakeEsi, FakeClock, EsiClient]
+) -> None:
+    fake, _, client = esi
+    seed_corporations(entities, {"corporation_id": 98000001})
+    seed_characters(entities, *({"character_id": i} for i in range(1, 251)))
+    seen = affiliation_server(
+        fake, {i: (98000001, None) for i in range(1, 251) if i != 137}, invalid={137}
+    )
+    refresh = job(client, entities, env)
+    refresh.affiliation_cycle_step(env.registry, cancel=lambda: None)
+    rejected = [b for b in seen if 137 in b]
+    assert [len(b) for b in rejected] == [250, 25, 3, 1]  # four errors, not eight
+    assert len(seen) == 1 + 10 + 9 + 3
+    assert entities.lookup("characters", [137]).to_pylist()[0]["deleted"] is True
+
+
+def test_error_cap_stops_the_slice_after_saving_progress(
+    env: SyncEnv,
+    entities: EntityStore,
+    esi: tuple[FakeEsi, FakeClock, EsiClient],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(refresh_module, "SLICE_ERROR_CAP", 3)
+    monkeypatch.setattr(refresh_module, "AFFILIATION_BATCH", 10)
+    fake, _, client = esi
+    seed_corporations(entities, {"corporation_id": 98000001})
+    seed_characters(entities, *({"character_id": i} for i in range(1, 31)))
+    fake.put("/alliances", [])
+    seen = affiliation_server(
+        fake, {i: (98000001, None) for i in range(1, 31)}, invalid={4, 15, 26}
+    )
+    result = run(env, job(client, entities, env, populate=True))
+    assert result.status is RunStatus.SUCCEEDED
+    # Batch 1 (two errors) and batch 2 (two more) complete, then the cap ends the slice:
+    # the cursor is saved past batch 2, so nothing that failed is sent again.
+    state = json.loads(env.registry.state_get(CYCLE_STATE) or "{}")
+    assert state["cursor"] == 20 and "finished_at" not in state
+    sent = len(seen)
+    run(env, job(client, entities, env, populate=True))
+    assert seen[sent][0] == 21  # resumed with batch 3
+    assert not any(4 in b or 15 in b for b in seen[sent:])

@@ -8,6 +8,7 @@ import pytest
 import respx
 
 from evedw.domain.datasets import MARKET_HISTORY
+from evedw.domain.registry import DiscoveredObject
 from evedw.sources.everef import (
     DownloadError,
     EveRefClient,
@@ -210,3 +211,43 @@ def test_discover_listing_dataset_tries_index_then_html(
         ("2026/eve-kill-com-karbowiak-2026-05-10.tar.bz2", date(2026, 5, 10), 858_967_779),
     ]
     assert all(o.expected_count is None and o.etag is None for o in found)
+
+
+def test_rate_limit_waits_as_asked_and_at_least_the_floor(
+    router: respx.Router, client: EveRefClient, sleeps: list[float]
+) -> None:
+    url = f"{BASE_URL}/market-history/2026/x.csv.bz2"
+    router.head(url).mock(
+        side_effect=[
+            httpx.Response(429, headers={"Retry-After": "90"}),
+            httpx.Response(429),
+            httpx.Response(200, headers={"ETag": '"e"'}),
+        ]
+    )
+    assert client._request("HEAD", url) is not None  # pyright: ignore[reportPrivateUsage]
+    # Retry-After 90 on the first attempt; no header on the second: the 30 s floor, doubled.
+    assert sleeps == [90.0, 60.0]
+
+
+def test_failed_head_keeps_index_metadata_instead_of_failing(
+    router: respx.Router, client: EveRefClient
+) -> None:
+    def obj(name: str) -> DiscoveredObject:
+        return DiscoveredObject(
+            dataset="market_history",
+            object_key=f"2026/{name}",
+            url=f"{BASE_URL}/market-history/2026/{name}",
+            logical_date=date(2026, 10, 1),
+            etag="index-etag",
+            size=10,
+            last_modified=None,
+            expected_count=None,
+        )
+
+    router.head(f"{BASE_URL}/market-history/2026/a").mock(return_value=httpx.Response(429))
+    router.head(f"{BASE_URL}/market-history/2026/b").mock(
+        return_value=httpx.Response(200, headers={"ETag": '"served"', "Content-Length": "11"})
+    )
+    a, b = client.refresh_headers([obj("a"), obj("b")])
+    assert a.etag == "index-etag" and a.size == 10
+    assert b.etag == "served" and b.size == 11

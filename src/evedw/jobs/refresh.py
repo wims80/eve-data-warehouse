@@ -62,6 +62,12 @@ CYCLE_STATE = "refresh.affiliation_cycle"
 CRAWL_STATE = "refresh.crawl"
 
 AFFILIATION_BATCH = 1000
+SPLIT_WAYS = 10
+"""A rejected affiliation batch is retried as tenths: about four errors isolate one invalid
+id in a batch of 1,000, where halving would cost about ten."""
+SLICE_ERROR_CAP = 100
+"""ESI error responses a slice may cause before it stops early. ESI's error limit is 100
+per minute; repeated failing requests are what its best practices warn against."""
 FIRST_KILLMAIL_DAY = date(2007, 12, 1)
 PERMANENT_RETRY = timedelta(days=365)
 TRANSIENT_RETRY = timedelta(hours=1)
@@ -73,7 +79,8 @@ FULL_COST: dict[str, int] = {"character": 2, "corporation": 2, "alliance": 1}
 
 
 class _OutOfBudget(Exception):
-    """The slice's allowance is spent; unwind to the end of the run."""
+    """The slice's allowance is spent, or it caused too many ESI errors; unwind to the end
+    of the run and leave the rest for the next slice."""
 
 
 # --- small helpers ------------------------------------------------------------------------
@@ -281,6 +288,9 @@ class SliceReport:
     crawl_queued: int = 0
     refreshed: int = 0
     rows: int = 0
+    esi_errors: int = 0
+    """Error responses this slice caused: 4xx answers and exhausted retries."""
+    splits: int = 0
 
 
 @dataclass(slots=True)
@@ -328,7 +338,8 @@ class RefreshJob:
         r = self._report
         log.info(
             "refresh slice: %d alliances swept, %d characters checked, %d changes, "
-            "%d active and %d crawl queued, %d entities refreshed, %d requests",
+            "%d active and %d crawl queued, %d entities refreshed, %d requests, "
+            "%d ESI errors, %d batch splits",
             r.alliances_swept,
             r.characters_checked,
             r.changes,
@@ -336,6 +347,8 @@ class RefreshJob:
             r.crawl_queued,
             r.refreshed,
             self.esi.policy.requests - self._sent_at_start,
+            r.esi_errors,
+            r.splits,
         )
         return JobOutcome(objects_changed=r.refreshed + r.changes, rows_written=r.rows)
 
@@ -352,6 +365,17 @@ class RefreshJob:
     def _need(self, requests: int) -> None:
         if self.allowance() < requests:
             raise _OutOfBudget()
+
+    def _error(self, *, stop: bool = True) -> None:
+        """Count an ESI error response; stop the slice at the cap. ``stop=False`` only
+        counts, for work that must finish and save its progress first."""
+        self._report.esi_errors += 1
+        if stop:
+            self._check_errors()
+
+    def _check_errors(self) -> None:
+        if self._report.esi_errors >= SLICE_ERROR_CAP:
+            raise _OutOfBudget(f"{self._report.esi_errors} ESI errors in this slice")
 
     # -- queueing ------------------------------------------------------------------------
 
@@ -410,8 +434,10 @@ class RefreshJob:
             except EsiPermanentError as exc:
                 if exc.status not in NOT_FOUND:
                     raise
+                self._error()
                 members = []
             except EsiTransientError as exc:
+                self._error()
                 log.warning("alliance %d members: %s; resuming next slice", alliance_id, exc)
                 return
             self._apply_alliance(registry, alliance_id, members)
@@ -490,6 +516,7 @@ class RefreshJob:
             {"last_at": now.isoformat(), "characters": len(character_ids)},
             now,
         )
+        self._check_errors()
 
     def affiliation_cycle_step(self, registry: Registry, *, cancel: Callable[[], None]) -> None:
         state: dict[str, Any] = _load(registry, CYCLE_STATE)
@@ -528,20 +555,28 @@ class RefreshJob:
             state["checked"] = int(state["checked"]) + len(batch)
             state["changed"] = int(state["changed"]) + self._report.changes - changes_before
             _save(registry, CYCLE_STATE, state, self.now())
+            self._check_errors()
 
     def _affiliate(self, ids: list[int]) -> list[Mapping[str, object]]:
-        """Affiliations of ``ids``. A ``400`` batch is split until the invalid ids are
-        isolated; those come back as ``{"character_id": id, "invalid": True}``."""
+        """Affiliations of ``ids``. A ``400`` batch is retried in tenths until the invalid
+        ids are isolated; those come back as ``{"character_id": id, "invalid": True}``."""
         self._need(1)
         try:
             body = self.esi.post_ids("/characters/affiliation", ids, store=False).body
         except EsiPermanentError as exc:
             if exc.status != 400:
                 raise
+            # Finish isolating: stopping halfway would re-send the same bad batch next time.
+            self._error(stop=False)
             if len(ids) == 1:
+                log.info("character %d: ESI calls the id invalid", ids[0])
                 return [{"character_id": ids[0], "invalid": True}]
-            middle = len(ids) // 2
-            return self._affiliate(ids[:middle]) + self._affiliate(ids[middle:])
+            self._report.splits += 1
+            size = -(-len(ids) // SPLIT_WAYS)
+            results: list[Mapping[str, object]] = []
+            for i in range(0, len(ids), size):
+                results += self._affiliate(ids[i : i + size])
+            return results
         return _array(body)
 
     def _apply_affiliations(self, registry: Registry, results: list[Mapping[str, object]]) -> None:
@@ -718,6 +753,7 @@ class RefreshJob:
                 )
             )
             self._report.refreshed += 1
+            self._error()  # counted after the entry is parked, so it is never retried
             return
         except EsiTransientError as exc:
             failures = entry.failures + 1
@@ -733,6 +769,7 @@ class RefreshJob:
                 )
             )
             log.warning("transient failure: %s", exc)
+            self._error()
             return
         registry.refresh_update(
             RefreshEntry(

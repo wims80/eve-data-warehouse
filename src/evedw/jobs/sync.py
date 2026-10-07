@@ -26,7 +26,7 @@ from evedw.domain.registry import (
 )
 from evedw.jobs.runner import JobCancelled, JobOutcome, RunContext
 from evedw.logs import log_context
-from evedw.sources.everef import EveRefClient
+from evedw.sources.everef import CONCURRENCY, EveRefClient
 from evedw.store.base import PartitionInfo
 
 log = logging.getLogger(__name__)
@@ -101,7 +101,7 @@ class SyncJob:
     """Objects younger than this always get their file headers refreshed."""
     sweep: bool = False
     """Refresh headers of every object, catching rewrites of old days."""
-    head_workers: int = 8
+    head_workers: int = CONCURRENCY
     offline: bool = False
     """Send no requests: skip discovery and import only objects whose current upstream
     etag has a retained raw file. With ``force`` this rebuilds the lake from ``raw/``."""
