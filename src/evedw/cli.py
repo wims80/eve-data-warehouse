@@ -32,7 +32,7 @@ from evedw.sources.everef import EveRefClient
 from evedw.store import open_entity_store, open_lake, open_registry
 from evedw.store.base import Registry
 
-app = typer.Typer(no_args_is_help=True, add_completion=False, help="EVE data warehouse.")
+app = typer.Typer(no_args_is_help=True, help="EVE data warehouse.")
 entities_app = typer.Typer(no_args_is_help=True, help="Character, corporation and alliance tables.")
 esi_app = typer.Typer(no_args_is_help=True, help="ESI policy state.")
 app.add_typer(entities_app, name="entities")
