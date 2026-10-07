@@ -9,37 +9,77 @@ same `.env` and `data/` (design §13). The two are interchangeable below.
 
 ## Starting and stopping the service
 
+The service runs as a systemd user unit (decided 2026-10-08), so it restarts
+after a crash, starts with your session, and logs to the journal:
+
 ```
-uv run evedw migrate      # once per data dir, and after pulling a schema change
-uv run evedw serve        # API on 127.0.0.1:8470 plus the scheduler
+systemctl --user status evedw           # running? since when, main PID
+systemctl --user restart evedw          # after a code or .env change
+journalctl --user -u evedw -f -o cat    # follow the log
+journalctl --user -u evedw --since "1 hour ago" -p warning -o cat
 ```
 
 The service holds `data/writer.lock` for its lifetime and is the only
-process that opens `data/warehouse.duckdb`. It logs to stdout; nothing else
-is written to a log file. To leave it running unattended:
+process that opens `data/warehouse.duckdb`. It logs to stdout, which the
+unit sends to the journal; journald rotates it, so there is no log file to
+manage. `-o cat` drops journald's own timestamp, since every line carries a
+UTC one.
 
-```
-setsid nohup uv run evedw serve > data/serve.log 2>&1 < /dev/null &
-```
-
-or as a systemd user unit (`~/.config/systemd/user/evedw.service`, then
-`systemctl --user enable --now evedw`):
+The unit, `~/.config/systemd/user/evedw.service`. Adjust the two paths
+(`which uv` for the second) and run `systemctl --user daemon-reload`, then
+`systemctl --user enable --now evedw`:
 
 ```ini
 [Unit]
 Description=EVE data warehouse
+After=network-online.target
 
 [Service]
-WorkingDirectory=/path/to/eve-data-warehouse
-ExecStart=/usr/bin/env uv run evedw serve
+WorkingDirectory=/home/you/code/eve-data-warehouse
+ExecStart=/home/you/.local/bin/uv run evedw serve
+Environment=PYTHONUNBUFFERED=1
 KillSignal=SIGTERM
 TimeoutStopSec=120
+Restart=on-failure
+RestartSec=30
 
 [Install]
 WantedBy=default.target
 ```
 
-Stop it with `SIGTERM` (or Ctrl-C). The current job notices at the next
+User units stop when you log out. To keep the service running without a
+session and start it at boot, enable lingering once:
+`loginctl enable-linger $USER`.
+
+For a quick foreground run instead, `uv run evedw serve` (Ctrl-C stops it).
+Stop the unit first; the second process fails fast on the writer lock.
+
+### When a change needs a restart
+
+The running service loaded the code and `.env` at startup, so:
+
+- Code the service runs (jobs, sources, store, service routes) or `.env`:
+  `systemctl --user restart evedw`.
+- A schema migration: `evedw migrate` refuses while the service holds the
+  lock, so `systemctl --user stop evedw && evedw migrate && systemctl
+  --user start evedw`.
+- Tests, CLI-only changes, docs and consumer code need no restart. Each
+  `evedw` command is a fresh process and picks up new code at once.
+
+A restart is cheap: the running job is cancelled and resumes from its saved
+state (see below). Do not run the service with auto-reload on file changes;
+every save would cancel a job.
+
+To try service changes without touching the live one, run a second instance
+on its own data dir and port. Leave the ESI contact blank so it schedules no
+entity refresh and never adds a second ESI request stream next to the live
+one (design §11); its EVE Ref syncs still run.
+
+```
+EVEDW_BIND=127.0.0.1:8471 EVEDW_ESI_CONTACT= evedw --data-dir /tmp/evedw-dev serve
+```
+
+Stopping (`systemctl --user stop`, `SIGTERM` or Ctrl-C): the current job notices at the next
 object boundary, is recorded `cancelled`, and queued runs are cancelled
 without starting. Nothing is left half-written: an object that was being
 imported is redone by the next sync. A cancelled run does not count for the
@@ -72,8 +112,9 @@ identical code.
 uv sync
 cp .env.example .env        # set EVEDW_DATA_DIR if data/ should live elsewhere
 uv run evedw migrate
-uv run evedw serve
 ```
+
+then install the systemd unit above, or `uv run evedw serve` in a terminal.
 
 The first scheduled syncs carry no date range, so they perform the full
 backfill of both datasets, newest day first (design §4 has the sizes and
@@ -244,10 +285,12 @@ whether that is happening:
 
 ```
 uv run evedw esi status                         # current pace and slowdown count
-grep -E "ESI pace|ESI errors|HTTP 4[0-9][0-9]" data/serve.log | tail
+journalctl --user -u evedw -o cat | grep -E "ESI pace|ESI errors|HTTP [45][0-9][0-9]" | tail
 ```
 
-An occasional slowdown is the policy doing its job. Repeated slowdowns, or
+An occasional slowdown is the policy doing its job; a single `HTTP 504`
+from ESI, retried after a few seconds, is typical (one in about 25,000
+requests on 2026-10-08). Repeated slowdowns, or
 a refresh slice ending early on `100 ESI errors`, mean something is sending
 bad requests: stop the service and find it before raising the pace again.
 

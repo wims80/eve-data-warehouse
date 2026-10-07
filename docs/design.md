@@ -659,6 +659,12 @@ The scheduled syncs carry no date range, so the first service run on a data
 dir that was only partially synced from the CLI performs the full backfill,
 newest first.
 
+Unattended, the service runs as a systemd user unit (decided 2026-10-08):
+`Restart=on-failure`, `SIGTERM` to stop with a 120 s grace, stdout to the
+journal, which does the rotation. No log file is written. A restart is how
+code and `.env` changes take effect; the cancelled run resumes from its
+saved state. `docs/operations.md` has the unit and the restart rules.
+
 The writer lock is an `fcntl.flock` on `data/writer.lock`. The service holds
 it for its lifetime and writes `service <url>` into the file next to its pid.
 A CLI command reads the holder: when it names a service, the command sends

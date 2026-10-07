@@ -16,6 +16,10 @@ uv run evedw status
 uv run evedw serve        # API on 127.0.0.1:8470 plus the scheduler
 ```
 
+To leave it running unattended, install it as a systemd user unit and read
+its log with `journalctl --user -u evedw -f -o cat`; `docs/operations.md`
+has the unit and when a change needs `systemctl --user restart evedw`.
+
 To type `evedw` instead of `uv run evedw`, from any directory, install it as
 an editable tool and, for zsh, add tab completion:
 
