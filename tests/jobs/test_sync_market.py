@@ -1,7 +1,7 @@
 """End-to-end sync of market history against a fake EVE Ref."""
 
 from dataclasses import replace
-from datetime import UTC, datetime
+from datetime import UTC, date, datetime
 from typing import Any
 
 import pytest
@@ -225,3 +225,64 @@ def test_wrong_date_inside_file_is_rejected(env: SyncEnv) -> None:
     with pytest.raises(SyncError, match="SourceContentError"):
         env.sync()
     assert not env.partition(D2).exists()
+
+
+def test_identical_rewrite_moves_last_modified_without_a_new_revision(env: SyncEnv) -> None:
+    publish_three_days(env.fake)
+    env.sync()
+    downloads = env.fake.downloads()
+    env.fake.modified[D2] = datetime(2026, 10, 4, 9, 41, 8, tzinfo=UTC)
+
+    run = env.sync()
+    assert run.status is RunStatus.SUCCEEDED and run.rows_written == 0
+    obj = env.obj(D2)
+    assert obj.status is ObjectStatus.IMPORTED and obj.current_revision == 1
+    assert obj.upstream_last_modified == datetime(2026, 10, 4, 9, 41, 8, tzinfo=UTC)
+    assert len(env.registry.revisions("market_history", obj.object_key)) == 1
+    assert env.fake.downloads() == downloads
+
+
+def test_millisecond_index_timestamps_do_not_trigger_header_checks(env: SyncEnv) -> None:
+    """Old days outside the header window are only re-checked when the index moved."""
+    old = date(2026, 1, 1)
+    env.fake.put(
+        old,
+        market_csv_bz2(old, rows=10),
+        modified=datetime(2026, 1, 2, 9, 51, 11, 716000, tzinfo=UTC),
+    )
+    env.sync()
+    heads = env.fake.requests("HEAD")
+    run = env.sync()
+    assert run.objects_changed == 0
+    assert env.fake.requests("HEAD") == heads
+
+
+def test_offline_force_rebuilds_the_lake_from_raw_without_requests(env: SyncEnv) -> None:
+    publish_three_days(env.fake)
+    env.sync()
+    for day in (D1, D2, D3):
+        env.partition(day).unlink()
+    env.fake.hits.clear()
+
+    run = env.sync(force=True, offline=True)
+    assert run.status is RunStatus.SUCCEEDED and run.objects_changed == 3
+    assert run.rows_written == 600
+    assert not env.fake.hits
+    assert all(env.partition(day).is_file() for day in (D1, D2, D3))
+    report = verify_dataset(
+        env.settings, env.registry, env.lake, MARKET_HISTORY, totals=env.fake.totals
+    )
+    assert report.ok, report.to_text()
+
+
+def test_offline_skips_objects_that_were_never_fetched(env: SyncEnv) -> None:
+    publish_three_days(env.fake)
+    env.sync(date_from=D3, date_to=D3)  # discovers all three, fetches only D3
+    assert env.obj(D1).status is ObjectStatus.NEW
+    env.fake.hits.clear()
+
+    run = env.sync(offline=True, force=True)
+    assert run.status is RunStatus.SUCCEEDED and run.objects_changed == 1
+    assert not env.fake.hits
+    assert env.obj(D1).status is ObjectStatus.NEW and env.obj(D2).status is ObjectStatus.NEW
+    assert env.obj(D3).status is ObjectStatus.IMPORTED

@@ -81,6 +81,21 @@ async def _never() -> ImportRun | None:
     raise AssertionError("submit must not be called")
 
 
+def test_cancelled_runs_do_not_push_the_schedule_back(registry: Registry) -> None:
+    done = registry.start_run(
+        "sync:killmails", Trigger.SCHEDULE, {"sweep": False}, now=T0 - timedelta(hours=8)
+    )
+    registry.finish_run(done.run_id, RunStatus.SUCCEEDED, now=T0 - timedelta(hours=7))
+    stopped = registry.start_run(
+        "sync:killmails", Trigger.MANUAL, {"sweep": False}, now=T0 - timedelta(minutes=5)
+    )
+    registry.finish_run(stopped.run_id, RunStatus.CANCELLED, now=T0 - timedelta(minutes=4))
+    job = ScheduledJob("sync:killmails", timedelta(hours=6), {"sweep": False})
+    Scheduler([job], lambda _job: _never(), now=Clock()).seed(registry)
+    assert job.last_run is not None and job.last_run.run_id == done.run_id
+    assert job.next_due == T0
+
+
 async def test_run_pending_runs_due_jobs_in_order_and_reschedules() -> None:
     clock = Clock()
     calls: list[str] = []

@@ -11,11 +11,10 @@ from pathlib import Path
 from evedw.config import Settings
 from evedw.domain.datasets import Dataset
 from evedw.domain.registry import ObjectStatus
-from evedw.domain.schemas import DATASET_TABLES
+from evedw.domain.schemas import DATASET_TABLES, partition_date, partition_name
 from evedw.jobs.runner import JobOutcome, RunContext
 from evedw.sources.everef import EveRefClient
 from evedw.store.base import Lake, Registry
-from evedw.store.duckdb_lake.lake import partition_date, partition_name
 
 log = logging.getLogger(__name__)
 

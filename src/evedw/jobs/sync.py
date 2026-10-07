@@ -22,6 +22,7 @@ from evedw.domain.registry import (
     RevisionStatus,
     SourceObject,
     SourceRevision,
+    UpsertSummary,
 )
 from evedw.jobs.runner import JobCancelled, JobOutcome, RunContext
 from evedw.logs import log_context
@@ -101,6 +102,9 @@ class SyncJob:
     sweep: bool = False
     """Refresh headers of every object, catching rewrites of old days."""
     head_workers: int = 8
+    offline: bool = False
+    """Send no requests: skip discovery and import only objects whose current upstream
+    etag has a retained raw file. With ``force`` this rebuilds the lake from ``raw/``."""
 
     def __call__(self, ctx: RunContext) -> JobOutcome:
         with log_context(dataset=self.dataset.name):
@@ -120,12 +124,18 @@ class SyncJob:
     def discover(self, ctx: RunContext) -> int:
         registry = ctx.registry
         now = datetime.now(UTC)
-        found = self.client.discover(self.dataset, self._years())
-        found = self._refresh_headers(ctx, found)
-        summary = registry.upsert_objects(found, now=now)
+        summary = UpsertSummary()
         gone = 0
-        if self.date_from is None and self.date_to is None:
-            gone = registry.mark_missing(self.dataset.name, {o.object_key for o in found}, now=now)
+        if self.offline:
+            log.info("offline: no discovery, the registry is taken as it stands")
+        else:
+            found = self.client.discover(self.dataset, self._years())
+            found = self._refresh_headers(ctx, found)
+            summary = registry.upsert_objects(found, now=now)
+            if self.date_from is None and self.date_to is None:
+                gone = registry.mark_missing(
+                    self.dataset.name, {o.object_key for o in found}, now=now
+                )
         outdated = registry.mark_parser_outdated(self.dataset.name, self.dataset.parser_version)
         forced = 0
         if self.force:
@@ -172,6 +182,7 @@ class SyncJob:
             if (
                 self.sweep
                 or known is None
+                or known.status in PENDING_STATUSES
                 or known.differs_from(obj)
                 or (obj.logical_date is not None and obj.logical_date >= tail_start)
             ):
@@ -208,6 +219,14 @@ class SyncJob:
             date_to=self.date_to,
             newest_first=True,
         )
+        if self.offline:
+            retained = [o for o in pending if self._has_raw(ctx, o)]
+            if len(retained) < len(pending):
+                log.info(
+                    "offline: skipping %d objects with no retained raw file",
+                    len(pending) - len(retained),
+                )
+            pending = retained
         log.info("%d objects pending", len(pending))
         scratch = ctx.settings.scratch_dir / ctx.run_id
         scratch.mkdir(parents=True, exist_ok=True)
@@ -240,6 +259,11 @@ class SyncJob:
         settings = ctx.settings
         revision: SourceRevision | None = None
         try:
+            live = self._live_revision(ctx, obj)
+            if live is not None:
+                registry.mark(self.dataset.name, obj.object_key, ObjectStatus.IMPORTED)
+                log.info("content unchanged, revision %d stays live", live.revision)
+                return 0
             revision = self._reusable_revision(ctx, obj)
             if revision is None:
                 ensure_free_space(settings)
@@ -286,6 +310,30 @@ class SyncJob:
                 error=f"{type(exc).__name__}: {exc}",
             )
             raise
+
+    def _live_revision(self, ctx: RunContext, obj: SourceObject) -> SourceRevision | None:
+        """The live revision when it already holds this upstream etag under this parser.
+
+        Upstream sometimes rewrites a file with identical content, which moves only its
+        Last-Modified; that must not add a revision. ``--force`` always re-imports.
+        """
+        if self.force or obj.current_revision is None or obj.upstream_etag is None:
+            return None
+        for r in ctx.registry.revisions(self.dataset.name, obj.object_key):
+            if (
+                r.revision == obj.current_revision
+                and r.status is RevisionStatus.IMPORTED
+                and r.upstream_etag == obj.upstream_etag
+                and r.parser_version == self.dataset.parser_version
+            ):
+                return r
+        return None
+
+    def _has_raw(self, ctx: RunContext, obj: SourceObject) -> bool:
+        return obj.upstream_etag is not None and any(
+            r.upstream_etag == obj.upstream_etag and (ctx.settings.data_dir / r.raw_path).is_file()
+            for r in ctx.registry.revisions(self.dataset.name, obj.object_key)
+        )
 
     def _reusable_revision(self, ctx: RunContext, obj: SourceObject) -> SourceRevision | None:
         """A retained raw file for this exact upstream etag, if we still have one.

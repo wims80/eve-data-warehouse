@@ -19,18 +19,6 @@ ENTITIES_DIR = "entities"
 """Subdirectory of the lake holding the entity table exports."""
 
 
-def partition_name(table: str, day: date) -> str:
-    return f"{PARTITION_COLUMN[table]}={day.isoformat()}"
-
-
-def partition_date(partition: str) -> date | None:
-    _, _, value = partition.partition("=")
-    try:
-        return date.fromisoformat(value)
-    except ValueError:
-        return None
-
-
 class ParquetLake:
     def __init__(self, lake_dir: Path) -> None:
         self.lake_dir = lake_dir

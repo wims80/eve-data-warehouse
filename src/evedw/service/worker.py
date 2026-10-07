@@ -4,6 +4,10 @@ Every trigger, whether from the scheduler or from ``POST /jobs``, becomes a queu
 is executed in a worker thread one at a time. A trigger therefore returns a run id at
 once, and the job runs when the writer is free. Shutdown sets the cancel flag the jobs
 check between units of work, waits for the current job, and marks queued runs cancelled.
+
+Queued runs start in order, except that a scheduled ``entities:refresh`` slice yields to
+any other queued run: it is filler work that runs between syncs, and a backfill should not
+wait behind it.
 """
 
 import asyncio
@@ -29,6 +33,10 @@ class _Item:
     run: ImportRun
     done: asyncio.Future[ImportRun]
 
+    @property
+    def yields(self) -> bool:
+        return self.run.job == "entities:refresh" and self.run.trigger is Trigger.SCHEDULE
+
 
 @dataclass(slots=True)
 class JobWorker:
@@ -38,6 +46,7 @@ class JobWorker:
     _queue: asyncio.Queue[_Item | None] = field(
         default_factory=lambda: asyncio.Queue[_Item | None]()
     )
+    """One entry per submit, used only to wake the loop; ``_next`` picks the run."""
     _pending: list[_Item] = field(default_factory=lambda: [])
     _current: ImportRun | None = None
     _cancel: threading.Event = field(default_factory=threading.Event)
@@ -103,13 +112,16 @@ class JobWorker:
     def lookup(self, run_id: RunId) -> ImportRun | None:
         return self.registry.get_run(run_id)
 
+    def _next(self) -> _Item:
+        return next((i for i in self._pending if not i.yields), self._pending[0])
+
     async def _loop(self) -> None:
         while True:
-            item = await self._queue.get()
-            if item is None:
+            if await self._queue.get() is None:
                 return
-            if item not in self._pending:
+            if not self._pending:
                 continue
+            item = self._next()
             self._pending.remove(item)
             self._current = item.run
             try:

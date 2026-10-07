@@ -40,7 +40,7 @@ JOB_NAMES: tuple[str, ...] = (
 )
 
 _PARAMS: dict[str, dict[str, str]] = {
-    "sync": {"from": "date", "to": "date", "force": "bool", "sweep": "bool"},
+    "sync": {"from": "date", "to": "date", "force": "bool", "sweep": "bool", "offline": "bool"},
     "entities:seed": {"snapshot": "snapshot", "force": "bool"},
     "entities:refresh": {"budget": "int", "populate": "bool"},
     "entities:export": {},
@@ -55,7 +55,7 @@ _PARAMS: dict[str, dict[str, str]] = {
 """Accepted parameter names and kinds per job. ``sync`` covers every ``sync:*`` job."""
 
 _DEFAULTS: dict[str, dict[str, Any]] = {
-    "sync": {"from": None, "to": None, "force": False, "sweep": False},
+    "sync": {"from": None, "to": None, "force": False, "sweep": False, "offline": False},
     "entities:seed": {"snapshot": "latest", "force": False},
     "entities:refresh": {"budget": None, "populate": True},
     "entities:export": {},
@@ -180,6 +180,7 @@ class JobCatalog:
                     date_to=params["to"],
                     force=params["force"],
                     sweep=params["sweep"],
+                    offline=params["offline"],
                     head_days=self.settings.head_days,
                 )
             finally:

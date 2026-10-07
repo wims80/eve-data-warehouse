@@ -13,17 +13,9 @@ from pathlib import Path
 import duckdb
 import pyarrow as pa
 
-from evedw.domain.schemas import ENTITY_TABLES, TIMESTAMP
+from evedw.domain.schemas import ENTITY_PRIMARY_KEYS, ENTITY_TABLES, TIMESTAMP
 
-PRIMARY_KEYS: dict[str, tuple[str, ...]] = {
-    "characters": ("character_id",),
-    "corporations": ("corporation_id",),
-    "alliances": ("alliance_id",),
-    "character_employment": ("character_id", "record_id"),
-    "corporation_alliance_history": ("corporation_id", "record_id"),
-}
-
-ENTITY_ID: dict[str, str] = {table: keys[0] for table, keys in PRIMARY_KEYS.items()}
+ENTITY_ID: dict[str, str] = {table: keys[0] for table, keys in ENTITY_PRIMARY_KEYS.items()}
 """The column ``lookup`` filters on: the entity the table is about."""
 
 
@@ -51,7 +43,7 @@ class DuckDBEntityStore:
         if rows.num_rows == 0:
             return 0
         data = rows.select(schema.names).cast(schema)
-        keys = PRIMARY_KEYS[table]
+        keys = ENTITY_PRIMARY_KEYS[table]
         key_list = ", ".join(keys)
         columns = ", ".join(schema.names)
         # Naive UTC in the store; the arrow table carries tz-aware timestamps.
@@ -96,7 +88,7 @@ class DuckDBEntityStore:
                 result = self._con.execute(
                     f"SELECT {', '.join(schema.names)} FROM {table} "
                     f"WHERE {column} IN (SELECT id FROM wanted) "
-                    f"ORDER BY {', '.join(PRIMARY_KEYS[table])}"
+                    f"ORDER BY {', '.join(ENTITY_PRIMARY_KEYS[table])}"
                 ).to_arrow_table()
             finally:
                 self._con.unregister("wanted")
@@ -114,7 +106,7 @@ class DuckDBEntityStore:
         for table, schema in ENTITY_TABLES.items():
             final = directory / f"{table}.parquet"
             tmp = directory / f"{table}.parquet.tmp"
-            order = ", ".join(PRIMARY_KEYS[table])
+            order = ", ".join(ENTITY_PRIMARY_KEYS[table])
             select_list = ", ".join(
                 f"{name}::TIMESTAMPTZ AS {name}" if schema.field(name).type == TIMESTAMP else name
                 for name in schema.names

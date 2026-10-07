@@ -100,3 +100,21 @@ def test_head_days_window(env: SyncEnv) -> None:
     assert delta == {
         f"HEAD /market-history/{outside.year}/market-history-{outside.isoformat()}.csv.bz2": 1
     }
+
+
+def test_pending_old_day_gets_its_headers_checked_before_download(env: SyncEnv) -> None:
+    """A day registered from the index but never fetched must not be downloaded against
+    the index's stale etag."""
+    # Same year as the ranged sync below, but outside the header window.
+    old_day, recent = TODAY - timedelta(days=200), TODAY - timedelta(days=3)
+    old = market_csv_bz2(old_day, rows=100)
+    env.fake.put(old_day, old, expected=100)
+    env.fake.put(recent, market_csv_bz2(recent, rows=10), expected=10)
+    env.sync(date_from=recent, date_to=recent)  # registers old_day as new, from the index
+    assert env.obj(old_day).current_revision is None
+
+    env.fake.put(old_day, market_csv_bz2(old_day, rows=150), expected=150)
+    env.fake.stale_index[old_day] = old
+    run = env.sync()
+    assert run.status is RunStatus.SUCCEEDED and run.objects_changed == 1
+    assert env.lake.read("market_history", date_from=old_day, date_to=old_day).num_rows == 150

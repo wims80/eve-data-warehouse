@@ -9,6 +9,9 @@ from evedw.jobs.catalog import JOB_NAMES, JobCatalog, UnknownJobError, normalise
 from evedw.store import open_entity_store
 from tests.helpers import BASE_URL, D1, D3, SyncEnv, publish_three_days
 
+# The catalog opens its stores through the factories, so it needs a real backend.
+pytestmark = pytest.mark.duckdb_only
+
 
 def test_normalise_params_fills_defaults_and_parses() -> None:
     assert normalise_params("sync:killmails", {}) == {
@@ -16,6 +19,7 @@ def test_normalise_params_fills_defaults_and_parses() -> None:
         "to": None,
         "force": False,
         "sweep": False,
+        "offline": False,
     }
     parsed = normalise_params(
         "sync:market_history", {"from": "2026-10-01", "to": date(2026, 10, 2)}
@@ -71,6 +75,7 @@ def test_catalog_runs_sync_and_export(env: SyncEnv) -> None:
             "to": None,
             "force": False,
             "sweep": False,
+            "offline": False,
         }
         assert not env.partition(D1).exists() and env.partition(D3).exists()
 

@@ -84,8 +84,13 @@ class SourceObject:
         return (
             self.upstream_etag != seen.etag
             or self.upstream_size != seen.size
-            or self.upstream_last_modified != seen.last_modified
+            or _to_second(self.upstream_last_modified) != _to_second(seen.last_modified)
         )
+
+
+def _to_second(value: datetime | None) -> datetime | None:
+    """index.json carries milliseconds, HTTP Last-Modified only whole seconds."""
+    return None if value is None else value.replace(microsecond=0)
 
 
 @dataclass(frozen=True, slots=True)

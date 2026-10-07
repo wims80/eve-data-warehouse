@@ -4,6 +4,8 @@ These are the contract between sources, store and consumers. Change a lake schem
 together with a ``parser_version`` bump in ``datasets.py``.
 """
 
+from datetime import date
+
 import pyarrow as pa
 
 TIMESTAMP = pa.timestamp("us", tz="UTC")
@@ -160,12 +162,36 @@ ENTITY_TABLES: dict[str, pa.Schema] = {
     "corporation_alliance_history": CORPORATION_ALLIANCE_HISTORY,
 }
 
+ENTITY_PRIMARY_KEYS: dict[str, tuple[str, ...]] = {
+    "characters": ("character_id",),
+    "corporations": ("corporation_id",),
+    "alliances": ("alliance_id",),
+    "character_employment": ("character_id", "record_id"),
+    "corporation_alliance_history": ("corporation_id", "record_id"),
+}
+"""Upsert keys of the entity tables. The first column is the entity the table is about,
+which ``EntityStore.lookup`` filters on."""
+
 PARTITION_COLUMN: dict[str, str] = {
     "killmails": "source_date",
     "attackers": "source_date",
     "items": "source_date",
     "market_history": "date",
 }
+
+
+def partition_name(table: str, day: date) -> str:
+    """``date=2026-10-01``: the hive directory of one day of a lake table."""
+    return f"{PARTITION_COLUMN[table]}={day.isoformat()}"
+
+
+def partition_date(partition: str) -> date | None:
+    _, _, value = partition.partition("=")
+    try:
+        return date.fromisoformat(value)
+    except ValueError:
+        return None
+
 
 DATASET_TABLES: dict[str, tuple[str, ...]] = {
     "killmails": ("killmails", "attackers", "items"),

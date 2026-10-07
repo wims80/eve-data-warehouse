@@ -5,8 +5,8 @@ import duckdb
 import pyarrow as pa
 import pytest
 
-from evedw.domain.schemas import MARKET_HISTORY
-from evedw.store.duckdb_lake.lake import ParquetLake, partition_date, partition_name
+from evedw.domain.schemas import MARKET_HISTORY, partition_date, partition_name
+from evedw.store.duckdb_lake.lake import ParquetLake
 
 
 def rows(day: date, n: int) -> pa.Table:

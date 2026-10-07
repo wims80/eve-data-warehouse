@@ -42,6 +42,14 @@ class Settings(BaseSettings):
 
     log_level: str = "INFO"
 
+    @field_validator("esi_contact", mode="before")
+    @classmethod
+    def _blank_contact_is_unset(cls, value: object) -> object:
+        """``.env.example`` ships ``EVEDW_ESI_CONTACT=``; blank must not enable ESI refresh."""
+        if isinstance(value, str) and not value.strip():
+            return None
+        return value
+
     @field_validator(
         "sync_interval_killmails",
         "sync_interval_market",

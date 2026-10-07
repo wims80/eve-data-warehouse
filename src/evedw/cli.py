@@ -310,6 +310,14 @@ def sync(
         bool,
         typer.Option("--sweep", help="Re-check the headers of every file, not only recent ones."),
     ] = False,
+    offline: Annotated[
+        bool,
+        typer.Option(
+            "--offline",
+            help="No network: import only from retained raw files. "
+            "With --force, rebuilds the lake from raw/.",
+        ),
+    ] = False,
     no_wait: NoWait = False,
 ) -> None:
     """Discover, fetch and import changed objects of a dataset, newest first."""
@@ -323,7 +331,13 @@ def sync(
     run = _dispatch(
         settings,
         f"sync:{ds.name}",
-        {"from": _day(date_from), "to": _day(date_to), "force": force, "sweep": sweep},
+        {
+            "from": _day(date_from),
+            "to": _day(date_to),
+            "force": force,
+            "sweep": sweep,
+            "offline": offline,
+        },
         wait=not no_wait,
     )
     _print_run(run)

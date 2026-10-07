@@ -62,7 +62,8 @@ Facts below were measured on 2026-10-05 against live EVE Ref data.
   matched. The index is therefore the listing, never the change feed; see
   section 6.
 - Size: a 2026 day is around 3 MB compressed and 15k killmails. 2007 days are
-  a few thousand killmails. Full history is in the order of 140M killmails.
+  a few thousand killmails. Full history measured 95.6M killmails on
+  2026-10-05 (section 4).
 - The same killmail ID can appear in two daily archives (kat found about
   14k such IDs). The lake keys facts by `(source_date, killmail_id)` and
   provides a deduplicating view for consumers that need one row per ID.
@@ -73,6 +74,12 @@ Facts below were measured on 2026-10-05 against live EVE Ref data.
 - Same per-year `index.json` shape. `totals.json` keys are `YYYY-MM-DD`.
 - CSV header: `average,date,highest,lowest,order_count,volume,http_last_modified,region_id,type_id`.
   All regions are included, about 48k rows per day.
+- The header changed over time. Measured over all 8,403 files on 2026-10-05:
+  up to 2018 `date,region_id,type_id,average,highest,lowest,volume,order_count`;
+  then `lowest` and `highest` swap places; from 2020-06-18 the current
+  columns plus `http_last_modified`, in two orders. Columns are read by name,
+  only these two column sets are accepted, and `http_last_modified` is NULL
+  before 2020-06-18.
 - Days are rewritten in place, and old days are rewritten long after the fact:
   the 2026-01-01 file was last modified 2026-10-03. The market history index
   was fresh when measured, but the same header-refresh policy applies to it
@@ -229,23 +236,28 @@ data/
 - Parquet files carry key-value metadata: `dataset`, `object_key`,
   `revision`, `source_sha256`, `parser_version`, `written_at`.
 
-Sizes measured 2026-10-05 from one live year of killmails (363 days,
-2025-10-05 to 2026-10-03) and one month of market history, ZSTD Parquet:
+Sizes measured 2026-10-05 after the full backfill (killmails 2007-12-05 to
+2026-10-03, 6,877 days; market history 2003-10-01 to 2026-10-04, 8,403 days),
+ZSTD Parquet:
 
-| Table | Per recent day | Full history estimate |
+| Table | Per recent day | Full history, measured |
 | --- | --- | --- |
-| killmails | 1.2 MB | 6 GB |
-| attackers | 0.8 MB | 4 GB |
-| items | 0.9 MB | 5 GB |
-| market_history | 0.8 MB | 7 GB |
-| raw killmail archives | 3 MB | 15 GB |
-| raw market archives | 0.6 MB | 5 GB |
-| entity tables in warehouse.duckdb (2026-05-10 seed) | | 2.2 GB |
-| entity Parquet export | | 0.53 GB |
-| raw backfill archive | | 0.86 GB each |
+| killmails | 1.2 MB | 5.6 GB, 95,579,144 rows (95,565,101 distinct ids) |
+| attackers | 0.8 MB | 4.4 GB, 441,519,636 rows |
+| items | 0.9 MB | 4.6 GB, 1,403,479,129 rows |
+| market_history | 0.8 MB | 7.1 GB, 425,033,763 rows |
+| raw killmail archives | 3 MB | 14.8 GB |
+| raw market archives | 0.6 MB | 4.5 GB |
+| entity tables in warehouse.duckdb (2026-05-10 seed) | | 2.1 GB |
+| entity Parquet export | | 0.5 GB |
+| raw backfill archive | | 0.82 GB each |
 
-Older years have far fewer killmails per day, so the full-history numbers
-are upper bounds. Everything fits in well under 100 GB. The disk guard is a free-space floor
+The whole data dir is about 45 GB. Backfill wall time on this machine, one
+object at a time, newest first: market history 6,104 days in 15.5 min when
+the raw files were already retained (the first pass downloaded at about
+2.7 days a second, roughly 50 min for all of history); killmails 6,408 days
+in 2 h 52 min including downloads. No day of either dataset disagreed with
+totals.json. The disk guard is a free-space floor
 (`EVEDW_MIN_FREE_GB`, default 20) checked before each download and import.
 
 ## 5. Registry
@@ -303,14 +315,20 @@ discover   fetch per-year index.json for the object listing, then HEAD a
            bounded set of files and take etag, size and last_modified from
            the response headers, because the index lags the files (section
            2.1). The set is: every object inside an explicit date range,
-           every object not yet in the registry, every object whose index
+           every object not yet in the registry, every object still pending
+           (it is about to be downloaded), every object whose index
            entry differs from the registry, every object younger than
            `EVEDW_HEAD_DAYS` (default 120), and on a sweep every object.
            HEADs run eight at a time; a full killmail sweep is about 7,000
            requests. Then compare with source_object: new or different ->
-           status `changed`. Entries that vanished -> `gone` (data stays).
-           Refresh expected_count from totals.json.
-fetch      download to scratch, verify Content-Length against index size and
+           status `changed`. `last_modified` compares at whole seconds,
+           because the index carries milliseconds and HTTP dates do not.
+           Entries that vanished -> `gone` (data stays). Refresh
+           expected_count from totals.json.
+fetch      skip an object whose live revision already has its etag under
+           the current parser_version (an identical rewrite upstream only
+           moves Last-Modified); mark it `imported` again, unless forced.
+           Otherwise download to scratch, verify Content-Length against index size and
            response ETag against index etag. Mismatch means the upstream file
            moved under us: re-discover that object instead of failing the
            run. Hash to sha256, move into raw/, insert source_revision.
@@ -507,14 +525,17 @@ run reschedules at the normal interval with the error in the run log. At
 startup the next-due times are seeded from the run log: the last run of the
 same job with the same parameters counts whatever its trigger, so a manual
 sync pushes the next scheduled one back a full interval, and a restart does
-not reset a weekly job. An entry with no recorded run is due immediately,
+not reset a weekly job. A cancelled run does not count: it stopped before
+finishing, so after a restart its job is due again. An entry with no recorded run is due immediately,
 except the sweeps and `verify`, which wait one interval. No third-party
 scheduler.
 
 `entities:refresh` is "continuous" as slices: every `EVEDW_REFRESH_INTERVAL`
 (5 min) a refresh run may send at most `EVEDW_REFRESH_SLICE` (1,500) requests,
 about 25 minutes at one request a second, then yields so a sync is never
-blocked for hours by a long drain. It is not scheduled at all while
+blocked for hours by a long drain. A queued scheduled slice also lets any
+other queued run start before it, so a triggered backfill does not wait
+behind refresh work; a manually triggered refresh keeps its place. It is not scheduled at all while
 `EVEDW_ESI_CONTACT` is unset, because ESI asks for contact details in the
 User-Agent; the service logs a warning instead. `entities:export` runs every
 `EVEDW_EXPORT_INTERVAL` (daily) and `verify` every `EVEDW_VERIFY_INTERVAL`
@@ -538,7 +559,11 @@ On shutdown the service sets a cancel flag that jobs check between objects
 it `cancelled`, and marks queued runs cancelled without starting them.
 
 Every job accepts a date range and a `--force` flag that treats objects in
-range as `changed`. That is the manual backfill path.
+range as `changed`. That is the manual backfill path. `sync --offline` sends
+no requests: it skips discovery and works only on objects whose current
+etag has a retained raw file, so `sync --offline --force` rebuilds the lake
+from `raw/` (section 4). It needs the registry; `raw/` alone does not record
+etags or expected counts.
 
 ## 9. Service API
 
@@ -550,7 +575,7 @@ Bound to `127.0.0.1:8470` by default. No authentication, local only.
 | `GET /datasets/{name}/objects?changed_since=<ts>` | objects whose current revision was imported after a timestamp (timezone required). The incremental pull primitive for consumers. Without the parameter: every object, oldest first. |
 | `GET /datasets/{name}/objects/{key}` | the object and its full revision chain |
 | `GET /jobs` | job names |
-| `POST /jobs/{name}` with the parameters as a JSON object | queues the job and returns `202` with the run id. Unknown job `404`, bad parameter `422`. Parameters per job: sync `{from, to, force, sweep}`, `entities:seed` `{snapshot, force}`, `entities:refresh` `{budget, populate}`, `verify` `{dataset, from, to, hash, offline}`. |
+| `POST /jobs/{name}` with the parameters as a JSON object | queues the job and returns `202` with the run id. Unknown job `404`, bad parameter `422`. Parameters per job: sync `{from, to, force, sweep, offline}`, `entities:seed` `{snapshot, force}`, `entities:refresh` `{budget, populate}`, `verify` `{dataset, from, to, hash, offline}`. |
 | `GET /runs?limit=&job=` and `GET /runs/{id}` | run log |
 | `GET /lake?table=` | partition manifest: table, partition, path, row count, revision, source sha256, parser version, written_at |
 | `GET /query` | the named queries and their parameters |

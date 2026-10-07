@@ -29,3 +29,10 @@ def test_ensure_dirs_creates_layout(settings: Settings) -> None:
     assert settings.raw_dir.is_dir()
     assert settings.lake_dir.is_dir()
     assert settings.scratch_dir.is_dir()
+
+
+@pytest.mark.parametrize("blank", ["", "  "])
+def test_blank_esi_contact_is_unset(monkeypatch: pytest.MonkeyPatch, blank: str) -> None:
+    monkeypatch.setenv("EVEDW_ESI_CONTACT", blank)
+    settings = Settings(_env_file=None)  # type: ignore[call-arg]
+    assert settings.esi_contact is None

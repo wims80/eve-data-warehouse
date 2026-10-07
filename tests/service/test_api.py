@@ -22,6 +22,9 @@ from evedw.store import open_registry
 from evedw.store.base import Registry
 from tests.helpers import BASE_URL, D1, D2, D3, FakeEveRef, market_csv_bz2, publish_three_days
 
+# The service opens its stores through the factories, so it needs a real backend.
+pytestmark = pytest.mark.duckdb_only
+
 
 @pytest.fixture
 def fake(settings: Settings) -> Iterator[FakeEveRef]:
@@ -205,6 +208,22 @@ async def test_scheduled_submit_waits_for_completion(
     assert run is not None and run.status is RunStatus.SUCCEEDED and run.objects_changed == 3
     assert run.trigger is Trigger.SCHEDULE
     assert state.worker.current is None and state.worker.queued == []
+
+
+async def test_scheduled_refresh_yields_to_other_queued_runs(
+    api: httpx.AsyncClient, fake: FakeEveRef
+) -> None:
+    publish_three_days(fake)
+    state = state_of(api)
+    first = state.worker.submit("entities:export", {}, trigger=Trigger.MANUAL)
+    refresh = state.worker.submit(
+        "entities:refresh", {"populate": False, "budget": 0}, trigger=Trigger.SCHEDULE
+    )
+    sync = state.worker.submit("sync:market_history", {}, trigger=Trigger.MANUAL)
+    done = {r.run_id: await wait_for(api, r.run_id) for r in (first, refresh, sync)}
+    assert done[sync.run_id]["status"] == "succeeded"
+    assert done[sync.run_id]["started_at"] < done[refresh.run_id]["started_at"]
+    assert done[first.run_id]["started_at"] < done[sync.run_id]["started_at"]
 
 
 async def test_shutdown_cancels_queued_and_running_jobs(

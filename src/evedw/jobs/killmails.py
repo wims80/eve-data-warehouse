@@ -19,13 +19,12 @@ import pyarrow as pa
 
 from evedw.domain.datasets import KILLMAILS, Dataset
 from evedw.domain.registry import SourceObject, SourceRevision
-from evedw.domain.schemas import ATTACKERS, ITEMS
+from evedw.domain.schemas import ATTACKERS, ITEMS, partition_name
 from evedw.domain.schemas import KILLMAILS as KILLMAILS_SCHEMA
 from evedw.jobs.runner import RunContext
 from evedw.jobs.sync import ImportResult, partition_metadata
 from evedw.sources.archives import tar_json_to_ndjson
 from evedw.store.base import Lake
-from evedw.store.duckdb_lake.lake import partition_name
 
 log = logging.getLogger(__name__)
 

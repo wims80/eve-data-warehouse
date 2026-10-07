@@ -62,6 +62,9 @@ reportUnknownArgumentType = false
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
-markers = ["live: hits real network services; never run by default"]
+markers = [
+    "live: hits real network services; never run by default",
+    "duckdb_only: needs the DuckDB backend; not run against the in-memory store stub",
+]
 addopts = "-m 'not live'"
 asyncio_mode = "auto"

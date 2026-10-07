@@ -1,0 +1,205 @@
+# Operations
+
+How to run the warehouse and what to do when something goes wrong. Design
+decisions are in [design.md](design.md); reading the data is in
+[consumers.md](consumers.md). Commands run from the repository root, which
+is where `.env` and the default `data/` directory live.
+
+## Starting and stopping the service
+
+```
+uv run evedw migrate      # once per data dir, and after pulling a schema change
+uv run evedw serve        # API on 127.0.0.1:8470 plus the scheduler
+```
+
+The service holds `data/writer.lock` for its lifetime and is the only
+process that opens `data/warehouse.duckdb`. It logs to stdout; nothing else
+is written to a log file. To leave it running unattended:
+
+```
+setsid nohup uv run evedw serve > data/serve.log 2>&1 < /dev/null &
+```
+
+or as a systemd user unit (`~/.config/systemd/user/evedw.service`, then
+`systemctl --user enable --now evedw`):
+
+```ini
+[Unit]
+Description=EVE data warehouse
+
+[Service]
+WorkingDirectory=/path/to/eve-data-warehouse
+ExecStart=/usr/bin/env uv run evedw serve
+KillSignal=SIGTERM
+TimeoutStopSec=120
+
+[Install]
+WantedBy=default.target
+```
+
+Stop it with `SIGTERM` (or Ctrl-C). The current job notices at the next
+object boundary, is recorded `cancelled`, and queued runs are cancelled
+without starting. Nothing is left half-written: an object that was being
+imported is redone by the next sync. A cancelled run does not count for the
+schedule, so a restart picks its job up again straight away.
+
+What the scheduler does on its own (design §8): a sync of each dataset every
+6 h, a header sweep of every file weekly, the entity Parquet export daily,
+`verify` weekly. `entities:refresh` is scheduled only when
+`EVEDW_ESI_CONTACT` is set to a real contact; leave it empty to keep the
+service off ESI entirely.
+
+Health and progress:
+
+```
+uv run evedw status                       # datasets, object counts, recent runs
+curl -s localhost:8470/health             # current and queued runs, schedule
+curl -s 'localhost:8470/runs?limit=5'
+```
+
+With the service running, every CLI job command (`sync`, `verify`,
+`entities ...`) is sent to it over HTTP and the CLI follows the run;
+`--no-wait` returns as soon as the run is queued. Without a service the
+command takes the writer lock and runs the job in-process. The two paths run
+identical code.
+
+## A fresh machine
+
+```
+uv sync
+cp .env.example .env        # set EVEDW_DATA_DIR if data/ should live elsewhere
+uv run evedw migrate
+uv run evedw serve
+```
+
+The first scheduled syncs carry no date range, so they perform the full
+backfill of both datasets, newest day first (design §4 has the sizes and
+times). To populate entities, seed from the latest EVE Ref backfill once:
+`uv run evedw entities seed latest`.
+
+## Forcing a range
+
+Re-import days that are already imported, for example after hand-editing
+or losing partitions:
+
+```
+uv run evedw sync killmails --from 2026-09-01 --to 2026-09-30 --force
+```
+
+Discovery runs for the range only, every file in it gets its headers
+re-checked, and every day in it is re-imported. If the upstream file is
+unchanged the retained raw file is reused, so nothing is downloaded; each
+day gets a new revision row pointing at the same raw file. If the file did
+change upstream, it is fetched as a new revision.
+
+To catch upstream rewrites of old days without re-importing anything,
+`--sweep` re-checks the headers of every file and imports only what moved.
+The weekly scheduled sweep does the same.
+
+## Raising `parser_version`
+
+When a normaliser's output changes (new column, fixed parsing), bump that
+dataset's `parser_version` in `src/evedw/domain/datasets.py` in the same
+commit, and add the change to design §7.
+
+The next sync of the dataset, scheduled or manual, marks every imported
+object whose live revision was produced by an older parser `changed` and
+re-imports it from the retained raw file. No downloads happen. To do it
+immediately and without any network traffic:
+
+```
+uv run evedw sync killmails --offline
+```
+
+Each re-imported day gets a new revision (the chain records which parser
+produced the live data) and its partitions carry the new
+`evedw.parser_version` in their metadata. Consumers polling
+`/datasets/{name}/objects?changed_since=` see every re-imported day as
+changed, which is correct: its data changed. Re-importing full history takes
+about as long as the import part of the original backfill (design §4).
+
+## Recovering from a failed object
+
+A failed object stays `failed` with its error in `last_error`, and the
+other objects of the run are unaffected. `failed` is a pending status, so
+the next sync retries it without being asked. Find failed objects and their
+errors:
+
+```
+uv run evedw status
+curl -s localhost:8470/datasets/killmails/objects \
+  | jq '.objects[] | select(.status == "failed") | {object_key, last_error}'
+curl -s localhost:8470/datasets/killmails/objects/2026/killmails-2026-10-01.tar.bz2
+```
+
+Then by error:
+
+- `UpstreamChangedError` or `DownloadError` (retries exhausted on 5xx, short
+  reads or transport errors): upstream moved or hiccupped mid-download.
+  Retry the day:
+  `uv run evedw sync killmails --from 2026-10-01 --to 2026-10-01`.
+- `DiskSpaceError`: free space fell under `EVEDW_MIN_FREE_GB`. Free space,
+  then sync again. Nothing was written.
+- `NestingError` or another normaliser error: the archive contains something
+  the normaliser does not handle. Fix the normaliser, bump `parser_version`,
+  sync. Keep the failing day as a trimmed fixture under `tests/fixtures/`.
+- `interrupted`: the process was stopped mid-object. The next sync redoes it.
+
+A count mismatch against `totals.json` is not a failure. The revision is
+imported and marked unverified (`verified = false`), because EVE Ref updates
+the archive and the totals at different times; `verify` lists the gap. If it
+persists after the next sweep, force the day.
+
+### When `verify` reports a raw file problem
+
+`missing_raw` or `raw_hash` means the retained archive of a live revision is
+gone or damaged on disk. Raw archives are never deleted, so move a damaged
+file aside rather than removing it, then force the day so it is fetched
+again:
+
+```
+mkdir -p data/quarantine
+mv data/raw/killmails/2026/killmails-2026-10-01/<sha256>.tar.bz2 data/quarantine/
+uv run evedw sync killmails --from 2026-10-01 --to 2026-10-01 --force
+```
+
+If EVE Ref still serves the same content, the new download hashes to the
+same sha256 and lands at the same path.
+
+Other `verify` issue kinds: `missing_partition`, `row_count` and
+`stale_partition` (the partition on disk does not match the live revision)
+are fixed by forcing the day; `orphan_partition` is a partition directory
+with no registry object, usually left by hand; `unknown_keys` means
+upstream added JSON keys the normaliser does not map yet (data is still
+imported).
+
+## Rebuilding the lake from `raw/` offline
+
+The lake is derived data. With the registry (`warehouse.duckdb`) and `raw/`
+intact, rebuild it without touching the network:
+
+```
+uv run evedw sync killmails --offline --force
+uv run evedw sync market_history --offline --force
+uv run evedw verify --offline
+```
+
+`--offline` skips discovery and works only on objects whose current etag
+has a retained raw file; everything else is skipped and left for the next
+online sync. `--force` re-imports days that are already imported. Use
+`--from` and `--to` to rebuild part of the lake. Partitions are replaced
+atomically one day at a time, so consumers can keep reading during the
+rebuild. Entity exports are rebuilt with `uv run evedw entities export`.
+
+The registry cannot be rebuilt from `raw/` alone: the file names hold the
+content hash but not the upstream etag or the expected counts. Back up
+`warehouse.duckdb` by copying it while the service is stopped. If it is lost
+anyway, `evedw migrate` and an online sync rebuild everything by
+downloading again, and the entity tables need a fresh
+`evedw entities seed latest`.
+
+## ESI stops
+
+A 420 or 403 from ESI stops every ESI request until an operator clears it
+(design §11). `uv run evedw esi status` shows the reason and the counters.
+Find out why it happened before resuming with `uv run evedw esi resume`.

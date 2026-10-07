@@ -102,6 +102,15 @@ def test_changed_upstream_marks_object_changed(
     assert obj.status is ObjectStatus.CHANGED
 
 
+def test_sub_second_last_modified_difference_is_unchanged(registry: Registry) -> None:
+    """index.json has milliseconds, a HEAD has whole seconds; both describe one file."""
+    registry.upsert_objects([discovered()], now=NOW)
+    registry.mark("killmails", "2026/killmails-2026-10-01.tar.bz2", ObjectStatus.IMPORTED)
+    with_ms = datetime(2026, 10, 2, 3, 0, 0, 716000, tzinfo=UTC)
+    summary = registry.upsert_objects([discovered(last_modified=with_ms)], now=NOW)
+    assert (summary.changed, summary.unchanged) == (0, 1)
+
+
 def test_mark_missing_sets_gone_and_rediscovery_restores(registry: Registry) -> None:
     registry.upsert_objects(
         [discovered(), discovered("2026/killmails-2026-10-02.tar.bz2")], now=NOW

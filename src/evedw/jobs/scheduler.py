@@ -43,8 +43,9 @@ class ScheduledJob:
 
     def matches(self, run: ImportRun) -> bool:
         """A run of this job whose parameters agree with this entry's. Any trigger counts:
-        a manual sync pushes the next scheduled one back by a full interval."""
-        if run.job != self.name or run.status is RunStatus.QUEUED:
+        a manual sync pushes the next scheduled one back by a full interval. A cancelled
+        run does not: it stopped before finishing, so the job is due again on restart."""
+        if run.job != self.name or run.status in (RunStatus.QUEUED, RunStatus.CANCELLED):
             return False
         return all(_json_equal(run.params.get(k), v) for k, v in self.params.items())
 
@@ -59,8 +60,16 @@ def _json_equal(stored: Any, wanted: Any) -> bool:
 
 def default_jobs(settings: Settings) -> list[ScheduledJob]:
     jobs = [
-        ScheduledJob("sync:killmails", settings.sync_interval_killmails, {"sweep": False}),
-        ScheduledJob("sync:market_history", settings.sync_interval_market, {"sweep": False}),
+        ScheduledJob(
+            "sync:killmails",
+            settings.sync_interval_killmails,
+            {"sweep": False, "offline": False},
+        ),
+        ScheduledJob(
+            "sync:market_history",
+            settings.sync_interval_market,
+            {"sweep": False, "offline": False},
+        ),
         ScheduledJob("sync:killmails", settings.sweep_interval, {"sweep": True}, defer_first=True),
         ScheduledJob(
             "sync:market_history", settings.sweep_interval, {"sweep": True}, defer_first=True

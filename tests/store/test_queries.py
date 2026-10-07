@@ -13,6 +13,9 @@ from evedw.store.base import EntityStore, Queries, Registry
 from evedw.store.duckdb_lake.queries import QueryParam, convert_param, parse_query
 from tests.store.test_lake import rows
 
+# Named queries are backend SQL (design §10), not part of the store contract.
+pytestmark = pytest.mark.duckdb_only
+
 
 @pytest.fixture
 def queries(settings: Settings, registry: Registry) -> Iterator[Queries]:

@@ -175,6 +175,7 @@ def test_sync_is_sent_to_the_running_service(
         "to": None,
         "force": False,
         "sweep": False,
+        "offline": False,
     }
     assert not (data_dir / "warehouse.duckdb").exists()
 

@@ -1,6 +1,6 @@
 # Implementation plan
 
-Status: M0 to M4 complete (2026-10-05). Next: M5.
+Status: M0 to M5 complete (2026-10-07). Next: M6, outside this repository.
 
 Milestones are ordered so that each one leaves a working, testable system.
 Do not start a milestone before the previous one's acceptance checks pass.
@@ -167,6 +167,30 @@ implies.
 - Operations notes in `docs/operations.md`: starting the service, forcing a
   range, raising `parser_version`, recovering from a failed object, rebuilding
   the lake from `raw/` offline.
+
+Outcome (2026-10-07): the backfill ran inside the
+service. Market history (8,403 days, 425M rows) and killmails (6,877 days,
+95.6M killmails) are complete with no failed day and no count mismatch at
+import; sizes and wall times are in design §4. `verify` with hashing checked
+all 15,280 objects in a minute and reported only the newest market day,
+which upstream was still extending. The backfill found five defects, all
+fixed with tests: index `last_modified` (milliseconds) never matched HEAD
+(seconds), so unchanged days looked changed and every sync would re-HEAD all
+history; an identical upstream rewrite added a revision; pre-2020-06-18
+market files have no `http_last_modified` and two column orders (design
+§2.2); pending days registered from a lagging index were downloaded without
+a header check; a blank `EVEDW_ESI_CONTACT` counted as set and briefly
+enabled ESI refresh. The scheduler no longer counts cancelled runs, and a
+scheduled refresh slice yields to queued syncs. `sync --offline` was added
+because design §4 promised an offline rebuild that no command provided.
+The contract suites, sync, entity, runner and scheduler tests now also run
+against `tests/store/memory.py`; doing so moved entity primary keys and the
+partition helpers out of the DuckDB package into `domain/schemas.py`. The
+24-hour unattended run (2026-10-06 00:17 to 2026-10-07 00:17 UTC) recorded
+229 runs and no failure: four syncs of each dataset, the daily export and
+221 refresh slices. Syncs picked up rewritten recent days (the 2026-10-04
+market day reached revision 6), the ESI daily budget ran out in the evening
+and reset at midnight, and the service's memory stayed flat at 1.7 GB.
 
 ## M6. Consumers migrate
 
