@@ -1,6 +1,7 @@
 # Implementation plan
 
-Status: M0 to M5 complete (2026-10-07). M6 (entity coverage) in progress.
+Status: M0 to M5 complete (2026-10-07). M6 (entity coverage) code done, live
+acceptance in progress. M7 not started; it starts once M6 is accepted.
 
 Milestones are ordered so that each one leaves a working, testable system.
 Do not start a milestone before the previous one's acceptance checks pass.
@@ -216,12 +217,41 @@ Deliverables:
 - Live run: first affiliation cycle and alliance sweep; record change
   counts, crawl throughput and the first day's request mix in design §7.3.
 
-Acceptance: a corporation that changes alliance is current within a day and
-a character who changes corporation within the affiliation cycle, without
-anyone running a command; the crawl advances every day within the budget;
-`evedw entities status` shows all of it.
+Acceptance: the first alliance sweep and the first affiliation cycle
+complete on the live data dir without anyone running a command; a
+corporation that changed alliance is current after the sweep and a character
+who changed corporation is queued as a change; the crawl has refreshed its
+first entities within the budget; `evedw entities status` shows all of it;
+change counts and the request mix are recorded in design §7.3.
 
-## M7. Consumers migrate
+## M7. Manual entity add
+
+Not started. Starts once M6 is accepted.
+
+Characters that never appear on a killmail or in a backfill archive cannot
+be discovered (design §7.3), so an operator can add them by hand.
+
+Deliverables:
+
+- `evedw entities add character <id-or-name>...` and the job
+  `entities:add` (`POST /jobs/entities:add`). Names resolve through
+  `POST /universe/ids`; the entities are refreshed in full at once, not
+  queued behind the crawl. Once stored they are covered by the affiliation
+  cycle like any other character.
+- `evedw entities add corporation <id-or-name>... [--members]`: details and
+  alliance history at once. `--members` covers the members the warehouse
+  knows: characters whose stored corporation is that one, and characters
+  whose employment history includes it; they get an affiliation check now
+  and a change-class refresh. The full member list needs an authenticated
+  member character and is out of scope, by decision (2026-10-07).
+- Tests against the fake ESI; design §7.3 and §9 amended.
+
+Acceptance: adding a character by name that the warehouse did not have
+stores its details and employment history in one run; adding a corporation
+with `--members` refreshes it and queues its known members; both work from
+the CLI with the service running and without it.
+
+## M8. Consumers migrate
 
 Not part of this repository. Valuation, membership reconstruction and reports
 move out of kat into their own applications reading the lake. Kat is retired

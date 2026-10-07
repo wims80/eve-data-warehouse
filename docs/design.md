@@ -32,6 +32,8 @@ warehouse:
 - EveWho, DOTLAN and zKillboard scraping. A zKillboard metadata dataset can be
   added later as a fourth dataset if its flags are wanted.
 - Disk budgeting beyond a free-space floor. Nothing is deleted automatically.
+- Authenticated ESI (EVE SSO login), and with it full corporation member
+  lists. Only public endpoints are used (decided 2026-10-07).
 
 ## 2. Sources and how they change
 
