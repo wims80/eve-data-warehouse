@@ -19,6 +19,8 @@ from evedw.domain.datasets import DATASETS, ENTITIES_BACKFILL, get_dataset
 from evedw.domain.ids import RunId
 from evedw.domain.registry import ImportRun, Trigger
 from evedw.jobs.entities import ExportJob
+from evedw.jobs.focus import KINDS as FOCUS_KINDS
+from evedw.jobs.focus import FocusJob
 from evedw.jobs.importers import importer_for
 from evedw.jobs.refresh import RefreshJob
 from evedw.jobs.runner import JobFn, JobOutcome, JobRunner, RunContext, WriterLock
@@ -37,6 +39,7 @@ JOB_NAMES: tuple[str, ...] = (
     "entities:seed",
     "entities:refresh",
     "entities:export",
+    "entities:add",
     "verify",
 )
 
@@ -45,6 +48,7 @@ _PARAMS: dict[str, dict[str, str]] = {
     "entities:seed": {"snapshot": "snapshot", "force": "bool"},
     "entities:refresh": {"budget": "int", "populate": "bool"},
     "entities:export": {},
+    "entities:add": {"kind": "entity_kind", "ids": "ids", "members": "bool"},
     "verify": {
         "dataset": "dataset",
         "from": "date",
@@ -60,6 +64,7 @@ _DEFAULTS: dict[str, dict[str, Any]] = {
     "entities:seed": {"snapshot": "latest", "force": False},
     "entities:refresh": {"budget": None, "populate": True},
     "entities:export": {},
+    "entities:add": {"kind": None, "ids": None, "members": False},
     "verify": {"dataset": None, "from": None, "to": None, "hash": True, "offline": False},
 }
 
@@ -99,6 +104,12 @@ def _convert(name: str, kind: str, value: Any) -> Any:
         if value in ("latest", "all"):
             return value
         return _convert(name, "date", value)
+    elif kind == "entity_kind":
+        if value in FOCUS_KINDS:
+            return value
+        raise ValueError(f"{name}: expected one of {', '.join(FOCUS_KINDS)}, got {value!r}")
+    elif kind == "ids":
+        return _ids(name, value)
     elif kind == "dataset":
         if isinstance(value, str):
             try:
@@ -107,6 +118,24 @@ def _convert(name: str, kind: str, value: Any) -> Any:
                 raise ValueError(f"{name}: {exc.args[0]}") from None
             return value
     raise ValueError(f"{name}: expected {kind}, got {value!r}")
+
+
+def _ids(name: str, value: Any) -> list[int]:
+    """One or more positive ids, as a list or a comma-separated string."""
+    parts: list[Any] = []
+    if isinstance(value, str):
+        parts = value.split(",")
+    elif isinstance(value, list | tuple):
+        parts = list(value)  # pyright: ignore[reportUnknownArgumentType]
+    ids: set[int] = set()
+    for part in parts:
+        number = _convert(name, "int", part.strip() if isinstance(part, str) else part)
+        if number is None or number <= 0:
+            raise ValueError(f"{name}: expected positive ids, got {value!r}")
+        ids.add(number)
+    if not ids:
+        raise ValueError(f"{name}: expected one or more ids")
+    return sorted(ids)
 
 
 def normalise_params(name: str, raw: Mapping[str, Any]) -> dict[str, Any]:
@@ -123,6 +152,11 @@ def normalise_params(name: str, raw: Mapping[str, Any]) -> dict[str, Any]:
             params[field] = _convert(field, kind, raw[field])
     if key == "sync" and params["from"] and params["to"] and params["from"] > params["to"]:
         raise ValueError(f"{name}: from {params['from']} is after to {params['to']}")
+    if key == "entities:add":
+        if params["kind"] is None or params["ids"] is None:
+            raise ValueError(f"{name}: kind and ids are required")
+        if params["members"] and params["kind"] == "character":
+            raise ValueError(f"{name}: members applies to a corporation or an alliance")
     return params
 
 
@@ -211,6 +245,14 @@ class JobCatalog:
                 esi.close()
         elif name == "entities:export":
             yield ExportJob(self.entities, self.settings.entities_dir)
+        elif name == "entities:add":
+            esi = self._esi()
+            try:
+                yield FocusJob(
+                    esi, self.entities, params["kind"], params["ids"], members=params["members"]
+                )
+            finally:
+                esi.close()
         elif name == "verify":
             names = [params["dataset"]] if params["dataset"] else list(SYNC_JOBS)
             datasets = [get_dataset(n.removeprefix("sync:")) for n in names]

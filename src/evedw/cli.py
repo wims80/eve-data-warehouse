@@ -526,6 +526,33 @@ def entities_refresh(
         )
 
 
+@entities_app.command("add")
+def entities_add(
+    ctx: typer.Context,
+    kind: Annotated[str, typer.Argument(help="character, corporation or alliance.")],
+    ids: Annotated[list[int], typer.Argument(help="One or more ids.")],
+    members: Annotated[
+        bool,
+        typer.Option(
+            "--members",
+            help="Also the known members: a corporation's characters, an alliance's "
+            "corporations and their characters.",
+        ),
+    ] = False,
+    no_wait: NoWait = False,
+) -> None:
+    """Refresh these entities first: queued ahead of everything else, fetched by the next
+    refresh slices."""
+    settings = _state(ctx).settings
+    run = _dispatch(
+        settings,
+        "entities:add",
+        {"kind": kind, "ids": ids, "members": members},
+        wait=not no_wait,
+    )
+    _print_run(run, objects="entities queued")
+
+
 @entities_app.command("export")
 def entities_export(ctx: typer.Context, no_wait: NoWait = False) -> None:
     """Write the entity tables to Parquet under the lake for consumers."""

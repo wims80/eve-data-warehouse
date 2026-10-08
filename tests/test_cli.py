@@ -252,7 +252,7 @@ def test_speed_without_a_service(data_dir: Path, monkeypatch: pytest.MonkeyPatch
     assert result.exit_code == 0, result.output
     assert re.search(r"esi\s+[\d,]+ requests/min", result.output)
     assert "affiliation    cycle not started" in result.output
-    assert "queue          change +0" in result.output
+    assert "queue          focus +0  change +0" in result.output
 
 
 def test_esi_resume_edits_only_the_policy_file(data_dir: Path) -> None:

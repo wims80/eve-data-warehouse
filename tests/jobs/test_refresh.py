@@ -17,6 +17,7 @@ from evedw.domain.schemas import (
     CORPORATIONS,
     KILLMAILS,
 )
+from evedw.jobs.focus import FocusJob
 from evedw.jobs.refresh import CRAWL_STATE, CYCLE_STATE, RefreshJob, ids_from_killmails
 from evedw.jobs.runner import JobRunner
 from evedw.sources.esi import EsiClient, EsiStoppedError
@@ -26,7 +27,7 @@ from tests.helpers import TODAY, SyncEnv
 
 TODAY_AT = datetime(2026, 10, 5, 12, tzinfo=UTC)
 SEEDED_AT = datetime(2026, 5, 10, tzinfo=UTC)
-CHANGE, ACTIVE, IDLE, CRAWL = (int(c) for c in RefreshClass)
+FOCUS, CHANGE, ACTIVE, IDLE, CRAWL = (int(c) for c in RefreshClass)
 
 
 # --- fixtures and helpers -----------------------------------------------------------------
@@ -689,3 +690,82 @@ def test_downtime_ends_the_slice_and_leaves_the_entity_due(
     clock.now += 61
     assert slice_().objects_changed == 1
     assert queue(env.registry) == {("character", 90000059): IDLE}
+
+
+# --- operator focus (entities add) --------------------------------------------------------
+
+
+def test_focus_on_an_alliance_queues_its_members_ahead_of_everything(
+    env: SyncEnv, entities: EntityStore, esi: tuple[FakeEsi, FakeClock, EsiClient]
+) -> None:
+    fake, _, client = esi
+    serve_entities(fake)
+    # ESI lists 98000030 under the alliance now; 98000031 is stored with it but has left.
+    fake.put("/alliances/99000001/corporations", [98000030])
+    seed_alliances(entities, 99000001)
+    seed_corporations(
+        entities,
+        {"corporation_id": 98000030, "alliance_id": None},
+        {"corporation_id": 98000031, "alliance_id": 99000001},
+        {"corporation_id": 98000099, "alliance_id": 99000002},
+    )
+    seed_characters(
+        entities,
+        {"character_id": 90000059, "corporation_id": 98000030},  # member corporation
+        {"character_id": 90000060, "corporation_id": 98000099, "alliance_id": 99000001},
+        {"character_id": 90000061, "corporation_id": 98000099},  # elsewhere
+        {"character_id": 90000062, "corporation_id": 98000030, "deleted": True},
+    )
+    env.registry.refresh_push(
+        [RefreshEntry("character", 90000089, priority=CHANGE, next_due_at=TODAY_AT)]
+    )
+
+    focus = FocusJob(client, entities, "alliance", [99000001], members=True, now=lambda: TODAY_AT)
+    result = JobRunner(env.settings, env.registry, env.lock).run(
+        "entities:add", focus, trigger=Trigger.MANUAL
+    )
+    assert result.status is RunStatus.SUCCEEDED and result.objects_changed == 5
+    assert fake.hits == {"GET /alliances/99000001/corporations": 1}
+    assert queue(env.registry) == {
+        ("alliance", 99000001): FOCUS,
+        ("corporation", 98000030): FOCUS,
+        ("corporation", 98000031): FOCUS,
+        ("character", 90000059): FOCUS,
+        ("character", 90000060): FOCUS,
+        ("character", 90000089): CHANGE,
+    }
+
+    # The drain serves the focus entries, in full, before the change queue.
+    budget = 2 + 2 + 2 + 2 + 1  # both characters and corporations in full, the alliance
+    fake.put("/characters/90000060", character_body("Moved"))
+    fake.put("/characters/90000060/corporationhistory", [])
+    fake.put("/corporations/98000031", {"name": "Left", "ticker": "L", "member_count": 1})
+    fake.put("/corporations/98000031/alliancehistory", [])
+    run(env, job(client, entities, env, populate=False, budget=budget))
+    assert queue(env.registry)[("character", 90000089)] == CHANGE
+    assert {v for k, v in queue(env.registry).items() if k != ("character", 90000089)} == {IDLE}
+
+
+def test_focus_on_a_corporation_queues_its_known_characters_without_requests(
+    env: SyncEnv, entities: EntityStore, esi: tuple[FakeEsi, FakeClock, EsiClient]
+) -> None:
+    fake, _, client = esi
+    seed_characters(
+        entities,
+        {"character_id": 90000059, "corporation_id": 98000030},
+        {"character_id": 90000061, "corporation_id": 98000099},
+    )
+    env.registry.refresh_push(
+        [RefreshEntry("character", 90000059, priority=IDLE, next_due_at=TODAY_AT)]
+    )
+    focus = FocusJob(
+        client, entities, "corporation", [98000030], members=True, now=lambda: TODAY_AT
+    )
+    JobRunner(env.settings, env.registry, env.lock).run(
+        "entities:add", focus, trigger=Trigger.MANUAL
+    )
+    assert not fake.hits
+    assert queue(env.registry) == {
+        ("corporation", 98000030): FOCUS,
+        ("character", 90000059): FOCUS,  # a settled entry is pulled forward
+    }

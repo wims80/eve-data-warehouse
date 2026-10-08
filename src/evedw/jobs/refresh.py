@@ -109,7 +109,8 @@ def _str(value: object) -> str | None:
     return value if isinstance(value, str) else None
 
 
-def _ids(body: Any) -> list[int]:
+def body_ids(body: Any) -> list[int]:
+    """The distinct positive ids in an ESI array body, ascending."""
     if not isinstance(body, list):
         raise ValueError("ESI returned a non-array body")
     return sorted({v for v in body if isinstance(v, int) and v > 0})  # pyright: ignore[reportUnknownVariableType]
@@ -423,7 +424,7 @@ class RefreshJob:
             if started is not None and now < started + self.alliance_sweep_interval:
                 return
             self._need(1)
-            live = _ids(self.esi.get("/alliances", store=False).body)
+            live = body_ids(self.esi.get("/alliances", store=False).body)
             self._start_alliance_sweep(registry, live)
             state = {"started_at": now.isoformat(), "ids": live, "pos": 0}
             _save(registry, ALLIANCE_STATE, state, now)
@@ -435,7 +436,7 @@ class RefreshJob:
             self._need(1)
             alliance_id = ids[pos]
             try:
-                members = _ids(
+                members = body_ids(
                     self.esi.get(f"/alliances/{alliance_id}/corporations", store=False).body
                 )
             except EsiPermanentError as exc:

@@ -31,6 +31,17 @@ def test_normalise_params_fills_defaults_and_parses() -> None:
     )
     assert normalise_params("entities:refresh", {"budget": "40"})["budget"] == 40
     assert normalise_params("verify", {"dataset": "killmails", "hash": False})["hash"] is False
+    assert normalise_params("entities:add", {"kind": "alliance", "ids": "3, 1,3"}) == {
+        "kind": "alliance",
+        "ids": [1, 3],
+        "members": False,
+    }
+    assert (
+        normalise_params(
+            "entities:add", {"kind": "corporation", "ids": [98000001], "members": True}
+        )["members"]
+        is True
+    )
 
 
 @pytest.mark.parametrize(
@@ -43,6 +54,11 @@ def test_normalise_params_fills_defaults_and_parses() -> None:
         ("entities:refresh", {"budget": True}, "expected int"),
         ("entities:seed", {"snapshot": "newest"}, "not a date"),
         ("verify", {"dataset": "stocks"}, "unknown dataset"),
+        ("entities:add", {"kind": "alliance"}, "kind and ids are required"),
+        ("entities:add", {"kind": "planet", "ids": [1]}, "expected one of"),
+        ("entities:add", {"kind": "alliance", "ids": "1,-2"}, "ids: expected"),
+        ("entities:add", {"kind": "alliance", "ids": []}, "one or more ids"),
+        ("entities:add", {"kind": "character", "ids": [1], "members": True}, "members applies"),
     ],
 )
 def test_normalise_params_rejects_bad_values(

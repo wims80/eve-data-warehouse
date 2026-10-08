@@ -49,6 +49,8 @@ class RunStatus(StrEnum):
 class RefreshClass(IntEnum):
     """Entity refresh queue priorities (design §7.3). Lower is served first."""
 
+    FOCUS = -1
+    """An operator asked for it with ``entities add``: refreshed in full before anything else."""
     CHANGE = 0
     """A sweep saw the entity change, or found an entity we do not have."""
     ACTIVE = 1

@@ -156,3 +156,15 @@ curl -s localhost:8470/runs/<run_id>
 `evedw sync market_history --from 2026-10-01 --force` does the same and waits
 for the run when the service is up. Runs execute one at a time; `GET /health`
 shows the current one, the queue and when each scheduled job is next due.
+
+An application can steer the importer the same way, for instance to have an
+alliance it reports on refreshed before anything else:
+
+```sh
+curl -s -X POST localhost:8470/jobs/entities:add -H 'content-type: application/json' \
+  -d '{"kind": "alliance", "ids": [99010468], "members": true}'
+```
+
+That only changes what the warehouse fetches first. Queries for a report stay in
+the application's own repository; the warehouse offers the lake, the API and
+generic jobs, never report-specific code.

@@ -272,9 +272,23 @@ service stopped on purpose) or with a small `--budget` to test a change.
 already queued. With a service running, both commands queue their job on it
 and follow the run.
 
-The queue classes are `change` (a sweep saw it move), `active` (on recent
-killmails or in an alliance, details older than 30 days), `crawl` (history
-never fetched) and `idle` (settled). `crawl` shrinking day by day is the
+To have particular entities refreshed first, for example everyone in an
+alliance a report is about:
+
+```
+evedw entities add alliance 99010468 --members   # the alliance, its corporations, their known characters
+evedw entities add character 2118583008 2118583261
+evedw entities status                            # the focus line drains first
+evedw entities export                            # then refresh the Parquet files for consumers
+```
+
+The job only queues (`focus`, ahead of every other class); the next slices
+fetch details and history for each, about two requests an entity. Only
+characters the warehouse already knows are found as members.
+
+The queue classes are `focus` (asked for with `entities add`), `change` (a
+sweep saw it move), `active` (on recent killmails or in an alliance, details
+older than 30 days), `crawl` (history never fetched) and `idle` (settled). `crawl` shrinking day by day is the
 history filling in; `change` should stay short once the first affiliation
 cycle has caught up with what changed since the last backfill.
 

@@ -296,7 +296,11 @@ Deliverables:
   characters below that id which the backfills missed; resumable.
 - `evedw entities add character <id-or-name>...` and the job `entities:add`
   (`POST /jobs/entities:add`). Names resolve through ESI `POST
-  /universe/ids`; the characters are refreshed in full at once.
+  /universe/ids`; the characters are refreshed in full at once. Built early
+  on 2026-10-08 by id, for the first consumer report: the `focus` queue
+  class, `entities add <kind> <id>... [--members]` with members from our own
+  tables and, for an alliance, ESI's corporation list. Names and eve-kill
+  members remain M8 work.
 - `evedw entities add corporation <id-or-name>... [--members]`: details and
   alliance history at once; `--members` takes the member list from
   eve-kill and refreshes every member we did not have, plus the known

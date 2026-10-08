@@ -554,17 +554,30 @@ the registry's `sweep_state`, so a restart resumes where the slice stopped.
    queued. First every character and corporation that appears on any
    killmail and has no queue entry, then every other live character and
    corporation by id, highest first.
-6. Drain the queue. Priorities are classes: 0 change, 1 active, 3 crawl;
-   2 is a settled entry, idle until something queues it again. Within a
-   class kinds take turns, so corporations never wait behind characters.
-   A change or active entry fetches details and history (an alliance only
-   details); a crawl entry fetches history only, one request. Success sets
+6. Drain the queue. Priorities are classes: -1 focus, 0 change, 1 active,
+   3 crawl; 2 is a settled entry, idle until something queues it again.
+   Within a class kinds take turns, so corporations never wait behind
+   characters. A focus, change or active entry fetches details and history
+   (an alliance only details); a crawl entry fetches history only, one
+   request. Success sets
    `last_refreshed_at`, priority 2 and a next-due time ten years out. A
    404/410 marks the stored row deleted with `source = 'esi'`; other 4xx
    park the entry for a year with the status recorded; transient failures
    back off by hours, doubling per failure up to a day. A 403 or 420 raises
    out of the job, which records the run as failed; nothing else talks to
    ESI until `evedw esi resume`.
+
+Operator focus (`evedw entities add <kind> <id>... [--members]`, job
+`entities:add`, decided 2026-10-08) steers the importer without changing
+what it stores: it queues the named entities as `focus`, ahead of every
+other class, so the next slices refresh them in full. With `--members` a
+corporation brings its known characters, and an alliance brings the
+corporations ESI lists for it now (one request) plus those stored with it,
+and their known characters. A settled entry is pulled forward, since a push
+keeps the lower priority. Characters the warehouse has never seen cannot be
+named this way; finding them is M8's discovery. The job is generic: it
+takes kinds and ids, never a report's notion of what it needs, and queries
+for a report live with the report (section 1).
 
 The daily budget (`EVEDW_ESI_DAILY_BUDGET`, default 800,000) bounds all of
 it. Steps 1 to 4 need a few thousand requests a day plus the change rate;
@@ -701,7 +714,7 @@ Bound to `127.0.0.1:8470` by default. No authentication, local only.
 | `GET /datasets/{name}/objects?changed_since=<ts>` | objects whose current revision was imported after a timestamp (timezone required). The incremental pull primitive for consumers. Without the parameter: every object, oldest first. |
 | `GET /datasets/{name}/objects/{key}` | the object and its full revision chain |
 | `GET /jobs` | job names |
-| `POST /jobs/{name}` with the parameters as a JSON object | queues the job and returns `202` with the run id. Unknown job `404`, bad parameter `422`. Parameters per job: sync `{from, to, force, sweep, offline}`, `entities:seed` `{snapshot, force}`, `entities:refresh` `{budget, populate}`, `verify` `{dataset, from, to, hash, offline}`. |
+| `POST /jobs/{name}` with the parameters as a JSON object | queues the job and returns `202` with the run id. Unknown job `404`, bad parameter `422`. Parameters per job: sync `{from, to, force, sweep, offline}`, `entities:seed` `{snapshot, force}`, `entities:refresh` `{budget, populate}`, `entities:add` `{kind, ids, members}`, `verify` `{dataset, from, to, hash, offline}`. |
 | `GET /runs?limit=&job=` and `GET /runs/{id}` | run log |
 | `GET /lake?table=` | partition manifest: table, partition, path, row count, revision, source sha256, parser version, written_at |
 | `GET /query` | the named queries and their parameters |
