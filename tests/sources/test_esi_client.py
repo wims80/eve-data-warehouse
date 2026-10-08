@@ -12,6 +12,7 @@ import respx
 from evedw.sources.esi import (
     EsiBudgetError,
     EsiClient,
+    EsiDowntimeError,
     EsiPermanentError,
     EsiStoppedError,
     EsiTransientError,
@@ -313,3 +314,85 @@ def test_expiry_honours_age_expires_and_no_store() -> None:
     }
     now = int(datetime(2026, 9, 8, 0, 10, tzinfo=UTC).timestamp())
     assert expiry(headers, now, 3600) == now + 1800
+
+
+# --- daily downtime -------------------------------------------------------------------------
+
+ELEVEN = datetime(2026, 10, 5, 11, tzinfo=UTC).timestamp()
+
+
+def status_body(start_time: str) -> dict[str, object]:
+    return {"players": 21000, "server_version": "3000000", "start_time": start_time}
+
+
+def test_downtime_pauses_before_eleven_and_resumes_once_the_server_restarted(
+    fake: FakeEsi, cache: MemoryCache, policy_path: Path
+) -> None:
+    clock = FakeClock(now=ELEVEN - 120)
+    client = make_client(cache, clock, policy_path)
+    fake.put("/alliances/1", {"name": "A"})
+    fake.put("/status", status_body("2026-10-04T11:05:00Z"))  # not restarted yet
+
+    with pytest.raises(EsiDowntimeError, match="daily downtime at 11:00 UTC"):
+        client.get("/alliances/1", store=False)
+    assert not fake.hits  # paused without sending anything
+
+    clock.now += 30
+    with pytest.raises(EsiDowntimeError, match="next /status check in 30s"):
+        client.get("/alliances/1", store=False)
+    assert not fake.hits
+
+    clock.now += 40  # a minute on: one /status check, still the old server
+    with pytest.raises(EsiDowntimeError):
+        client.get("/alliances/1", store=False)
+    assert fake.hits == {"GET /status": 1}
+
+    clock.now += 60
+    fake.put("/status", {"error": "down"}, status=503)  # one attempt, no retry, no slowdown
+    with pytest.raises(EsiDowntimeError):
+        client.get("/alliances/1", store=False)
+    assert fake.hits == {"GET /status": 2}
+    assert client.policy.slowdowns == 0 and client.policy.retries == 0
+
+    clock.now = ELEVEN + 8 * 60
+    fake.put("/status", status_body("2026-10-05T11:06:00Z"))
+    assert client.get("/alliances/1", store=False).body == {"name": "A"}
+    assert fake.hits == {"GET /status": 3, "GET /alliances/1": 1}
+    persisted = load_policy(policy_path)
+    assert persisted.downtime_since == 0 and persisted.resumed_at == ELEVEN + 8 * 60
+
+    clock.now += 60  # resumed inside the window: no second pause
+    client.get("/alliances/1", store=False)
+    assert fake.hits["GET /status"] == 3
+
+
+def test_a_server_error_shortly_before_eleven_starts_the_pause_without_retries(
+    fake: FakeEsi, cache: MemoryCache, policy_path: Path
+) -> None:
+    clock = FakeClock(now=ELEVEN - 10 * 60)
+    client = make_client(cache, clock, policy_path)
+    fake.put("/alliances/1", {"name": "A"})
+    fake.queue("/alliances/1", 502)
+    with pytest.raises(EsiDowntimeError, match="HTTP 502 on /alliances/1"):
+        client.get("/alliances/1", store=False)
+    assert fake.hits == {"GET /alliances/1": 1}
+    assert client.policy.slowdowns == 0 and client.policy.retries == 0
+    assert load_policy(policy_path).downtime_since == ELEVEN - 10 * 60
+
+    # The server came back early; the next check after a minute resumes.
+    fake.put("/status", status_body("2026-10-05T10:55:00Z"))
+    clock.now += 61
+    assert client.get("/alliances/1", store=False).body == {"name": "A"}
+
+
+def test_without_a_restart_a_healthy_status_resumes_after_the_deadline(
+    fake: FakeEsi, cache: MemoryCache, policy_path: Path
+) -> None:
+    clock = FakeClock(now=ELEVEN - 60)
+    client = make_client(cache, clock, policy_path)
+    fake.put("/alliances/1", {"name": "A"})
+    fake.put("/status", status_body("2026-10-04T11:05:00Z"))
+    with pytest.raises(EsiDowntimeError):
+        client.get("/alliances/1", store=False)
+    clock.now = ELEVEN + 30 * 60
+    assert client.get("/alliances/1", store=False).body == {"name": "A"}

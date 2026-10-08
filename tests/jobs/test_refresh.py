@@ -642,3 +642,50 @@ def test_error_cap_stops_the_slice_after_saving_progress(
     run(env, job(client, entities, env, populate=True))
     assert seen[sent][0] == 21  # resumed with batch 3
     assert not any(4 in b or 15 in b for b in seen[sent:])
+
+
+# --- daily downtime -----------------------------------------------------------------------
+
+
+def test_downtime_ends_the_slice_and_leaves_the_entity_due(
+    env: SyncEnv, entities: EntityStore, cache: MemoryCache
+) -> None:
+    at = datetime(2026, 10, 5, 10, 50, tzinfo=UTC)
+    fake = FakeEsi(env.router)
+    clock = FakeClock(now=at.timestamp())
+    client = EsiClient(
+        ESI_URL,
+        compatibility_date="2026-08-18",
+        contact="tests@example.test",
+        cache=cache,
+        policy_path=env.settings.esi_policy_path,
+        daily_budget=1000,
+        client=httpx.Client(),
+        sleep=clock.sleep,
+        clock=clock.time,
+    )
+    serve_entities(fake)
+    fake.queue("/characters/90000059", 502)
+    env.registry.refresh_push(
+        [RefreshEntry("character", 90000059, priority=CHANGE, next_due_at=at)]
+    )
+
+    def slice_() -> Any:
+        refresh = RefreshJob(
+            client, entities, env.lake, today=TODAY, now=lambda: at, populate=False
+        )
+        return run(env, refresh)
+
+    result = slice_()
+    assert result.status is RunStatus.SUCCEEDED and result.objects_changed == 0
+    assert requests(fake) == 1
+    (entry,) = env.registry.refresh_pop(limit=10, now=at)
+    assert entry.failures == 0 and entry.last_error is None and entry.priority == CHANGE
+
+    # Within the minute the next slice sends nothing; after it, /status says the server is
+    # back and the same entity is refreshed.
+    assert slice_().objects_changed == 0 and requests(fake) == 1
+    fake.put("/status", {"players": 1, "server_version": "1", "start_time": "2026-10-05T10:56:00Z"})
+    clock.now += 61
+    assert slice_().objects_changed == 1
+    assert queue(env.registry) == {("character", 90000059): IDLE}

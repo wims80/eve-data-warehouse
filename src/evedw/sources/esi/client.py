@@ -20,7 +20,15 @@ from typing import Any
 
 import httpx
 
-from evedw.sources.esi.policy import Policy, header, http_date, number, policy_route
+from evedw.sources.esi.policy import (
+    STATUS_EVERY,
+    Policy,
+    header,
+    http_date,
+    number,
+    policy_route,
+    server_up,
+)
 from evedw.sources.everef import user_agent
 from evedw.store.base import CachedResponse, ResponseCache
 
@@ -56,6 +64,11 @@ class EsiTransientError(EsiError):
 
 class EsiBudgetError(EsiError):
     """The daily request budget is spent."""
+
+
+class EsiDowntimeError(EsiError):
+    """ESI work is paused for the daily downtime. Nothing was sent, so nothing failed:
+    callers leave their work as it was and come back later."""
 
 
 @dataclass(frozen=True, slots=True)
@@ -188,6 +201,60 @@ class EsiClient:
     def _today(self) -> date:
         return datetime.fromtimestamp(self._clock(), tz=UTC).date()
 
+    # -- downtime ------------------------------------------------------------------------
+
+    def check_downtime(self) -> None:
+        """Raise ``EsiDowntimeError`` while ESI work is paused for the daily downtime
+        (design §11). While paused, ``/status`` is checked at most once a minute and the
+        pause ends when it shows the server back. Every request passes through here."""
+        policy = self._policy
+        if policy.downtime_due(self._clock()):
+            self._pause("daily downtime at 11:00 UTC")
+        if not policy.downtime_since:
+            return
+        if self._clock() - policy.status_checked_at < STATUS_EVERY:
+            raise EsiDowntimeError(self._paused_text())
+        policy.status_checked_at = self._clock()
+        self._save_policy()
+        try:
+            status = self._request(
+                "GET",
+                "/status",
+                body=None,
+                fallback_seconds=30,
+                store=False,
+                gate=False,
+                attempts=1,
+            ).body
+        except (EsiTransientError, EsiPermanentError) as exc:
+            log.info("ESI still down: %s", exc)
+            raise EsiDowntimeError(self._paused_text()) from None
+        if not server_up(status, self._clock()):
+            log.info("ESI still down: /status reports %s", json.dumps(status, sort_keys=True))
+            raise EsiDowntimeError(self._paused_text())
+        minutes = (self._clock() - policy.downtime_since) / 60
+        policy.resume_after_downtime(self._clock())
+        self._save_policy()
+        log.info(
+            "ESI back after %.0f min of downtime (server started %s)",
+            minutes,
+            status.get("start_time"),
+        )
+
+    def _pause(self, reason: str) -> None:
+        self._policy.pause_for_downtime(self._clock(), reason)
+        self._save_policy()
+        log.info("ESI paused for downtime (%s); checking /status once a minute", reason)
+
+    def _paused_text(self) -> str:
+        policy = self._policy
+        since = datetime.fromtimestamp(policy.downtime_since, tz=UTC)
+        wait = max(0, policy.status_checked_at + STATUS_EVERY - self._clock())
+        return (
+            f"ESI paused for downtime since {since:%H:%M:%S} UTC ({policy.downtime_reason}); "
+            f"next /status check in {wait:.0f}s"
+        )
+
     # -- public requests -----------------------------------------------------------------
 
     def get(self, route: str, *, fallback_seconds: int = 3600, store: bool = True) -> EsiResponse:
@@ -226,7 +293,11 @@ class EsiClient:
         body: str | None,
         fallback_seconds: int,
         store: bool = True,
+        gate: bool = True,
+        attempts: int | None = None,
     ) -> EsiResponse:
+        """``gate=False`` and ``attempts=1`` are for the ``/status`` check alone, which must
+        go out while everything else is paused for downtime."""
         policy = self._policy
         if policy.stopped:
             raise EsiStoppedError(f"ESI access is stopped: {policy.stopped}; resume to continue")
@@ -237,6 +308,8 @@ class EsiClient:
             policy.cache_hits += 1
             self._save_policy()
             return self._from_cache(cached, not_modified=False)
+        if gate:
+            self.check_downtime()
         if policy.budget_remaining(self._budget, self._today()) <= 0:
             raise EsiBudgetError(f"daily ESI budget of {self._budget} requests is spent")
 
@@ -250,7 +323,8 @@ class EsiClient:
             elif cached.last_modified:
                 headers["If-Modified-Since"] = cached.last_modified
         last_error: str = "no attempt made"
-        for attempt in range(self._attempts):
+        tries = attempts or self._attempts
+        for attempt in range(tries):
             self._wait_until(policy.ready_at(bucket_route, self._clock()))
             policy.requests += 1
             policy.retries += int(attempt > 0)
@@ -266,6 +340,9 @@ class EsiClient:
                 )
             except httpx.TransportError as exc:
                 last_error = f"{type(exc).__name__}: {exc}"
+                if policy.outage_expected(self._clock()):
+                    self._outage(route, last_error, gate=gate)
+                    break
                 spacing = policy.spacing
                 policy.warn(self._clock())
                 self._log_pace(spacing, last_error)
@@ -275,7 +352,10 @@ class EsiClient:
             status = response.status_code
             response_headers = dict(response.headers)
             spacing = policy.spacing
-            warning = policy.observe(bucket_route, status, response_headers, self._clock())
+            expected = status >= 500 and policy.outage_expected(self._clock())
+            warning = policy.observe(
+                bucket_route, status, response_headers, self._clock(), expected=expected
+            )
             self._log_pace(spacing, warning)
             if status in STOP_STATUS:
                 policy.stopped = f"HTTP {status} on {route} at {now}"
@@ -283,6 +363,10 @@ class EsiClient:
                 raise EsiStoppedError(
                     f"ESI {route}: HTTP {status}; all ESI work stopped until an operator resumes"
                 )
+            if expected:
+                last_error = f"HTTP {status}"
+                self._outage(route, last_error, gate=gate)
+                break
             if status in RETRY_STATUS or status >= 500:
                 last_error = f"HTTP {status}"
                 self._back_off(attempt, route, last_error)
@@ -325,11 +409,19 @@ class EsiClient:
                 self._store(key, entry, response_headers)
             return self._from_cache(entry, not_modified=False, fresh=True)
         raise EsiTransientError(
-            f"ESI {route}: giving up after {self._attempts} attempts ({last_error}); "
-            "cooldown persisted"
+            f"ESI {route}: giving up after {tries} attempts ({last_error}); cooldown persisted"
         )
 
     # -- helpers -------------------------------------------------------------------------
+
+    def _outage(self, route: str, reason: str, *, gate: bool) -> None:
+        """A server error where downtime is expected: no retry and no slowdown. A gated
+        request pauses ESI work and raises; the ``/status`` check just reports it."""
+        self._save_policy()
+        if gate:
+            if not self._policy.downtime_since:
+                self._pause(f"{reason} on {route}")
+            raise EsiDowntimeError(self._paused_text())
 
     def _log_pace(self, before: float, reason: str | None) -> None:
         after = self._policy.spacing

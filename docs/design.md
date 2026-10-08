@@ -777,6 +777,27 @@ Binding for every ESI request made by this project, including ad hoc scripts.
   `evedw esi status`; spacing and timers live in `policy.json`, so a
   restart keeps a slowed pace. A fresh policy starts at 1 s and ramps
   down.
+- EVE's daily downtime at 11:00 UTC pauses ESI work (decided 2026-10-08).
+  Without it, the 2026-10-08 downtime cost about 60 failing requests in 7
+  minutes, put 11 entities back by an hour and slowed the pace to 2 s, so
+  throughput took another 30 minutes to recover. Downtime sometimes begins a
+  minute or two early, so the pause starts at whichever comes first: 10:58
+  UTC, or the first 5xx or transport error from 10:45 on. Inside that window
+  (10:45 to 11:30) a server error is expected: it is not retried, does not
+  slow the pace and raises `EsiDowntimeError`: the request counts as not
+  done rather than failed. The refresh slice ends early and leaves the entity or
+  batch in hand due, so what met the downtime is retried as soon as ESI is
+  back. While paused, every request raises without being sent except
+  `GET /status`, checked once a minute (the first a minute after the pause
+  begins; one attempt, `store=False`). The pause ends when `/status`
+  answers, is not in VIP mode, and shows a `start_time` after 10:45 today,
+  that is, the server has restarted since the window opened; this also
+  covers a downtime that starts late. From 11:30 a healthy `/status` is
+  enough, so a day without a restart cannot pause the warehouse for good;
+  a downtime that overruns stays paused until `/status` answers. The pause
+  state lives in `policy.json` and `evedw esi status` shows it. Outside the
+  window, server errors are handled as before: retries, slowdowns,
+  transient backoff.
 - Send `User-Agent` with project name, version and `EVEDW_ESI_CONTACT`.
   Send `X-Compatibility-Date`, pinned in `config.py` (2026-08-18, verified
   2026-10-05 against `/meta/openapi.json?compatibility_date=`). Check the

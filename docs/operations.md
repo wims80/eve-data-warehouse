@@ -39,6 +39,8 @@ WorkingDirectory=/home/you/code/eve-data-warehouse
 ExecStart=/home/you/.local/bin/uv run evedw serve
 Environment=PYTHONUNBUFFERED=1
 KillSignal=SIGTERM
+# uv itself exits 143 on SIGTERM after the service has shut down cleanly
+SuccessExitStatus=143
 TimeoutStopSec=120
 Restart=on-failure
 RestartSec=30
@@ -293,6 +295,24 @@ from ESI, retried after a few seconds, is typical (one in about 25,000
 requests on 2026-10-08). Repeated slowdowns, or
 a refresh slice ending early on `100 ESI errors`, mean something is sending
 bad requests: stop the service and find it before raising the pace again.
+
+## ESI downtime
+
+ESI work pauses every day around EVE's downtime at 11:00 UTC (design §11):
+from 10:58, or earlier at the first server error from 10:45, until
+`GET /status` shows the restarted server. `evedw esi status` shows
+`downtime  paused since ...` while it lasts. The journal has one line when
+it pauses, one per minute while `/status` says it is still down, and one
+with the length of the pause when it resumes:
+
+```
+journalctl --user -u evedw --since "10:40 UTC" -o cat | /usr/bin/grep -E "downtime|still down"
+```
+
+Refresh slices during the pause end at once, leaving their work due; EVE
+Ref syncs carry on. Nothing needs doing by hand. If `/status` keeps
+answering after 11:30 while other routes fail, the normal retries and
+slowdowns take over.
 
 ## ESI stops
 

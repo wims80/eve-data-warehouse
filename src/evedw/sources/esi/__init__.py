@@ -4,6 +4,7 @@ conditional, and stopped outright on 403 or 420 until an operator resumes it."""
 from evedw.sources.esi.client import (
     EsiBudgetError,
     EsiClient,
+    EsiDowntimeError,
     EsiError,
     EsiPermanentError,
     EsiResponse,
@@ -17,6 +18,7 @@ from evedw.sources.esi.policy import Policy
 __all__ = [
     "EsiBudgetError",
     "EsiClient",
+    "EsiDowntimeError",
     "EsiError",
     "EsiPermanentError",
     "EsiResponse",

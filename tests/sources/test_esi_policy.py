@@ -1,6 +1,15 @@
 """Policy arithmetic ported from kat's tests: every malformed or extreme header fails closed."""
 
-from evedw.sources.esi.policy import MAX_SPACING, Policy, parse_limit, policy_route
+from datetime import UTC, datetime
+
+from evedw.sources.esi.policy import (
+    MAX_SPACING,
+    DowntimeWindow,
+    Policy,
+    parse_limit,
+    policy_route,
+    server_up,
+)
 
 
 def test_extreme_and_malformed_legacy_headers_do_not_bypass_cooldowns() -> None:
@@ -127,3 +136,68 @@ def test_calm_halves_the_spacing_back_to_the_floor() -> None:
     # A raised floor wins over a persisted faster spacing.
     restored.floor = 1.0
     assert restored.pace() == 1.0
+
+
+# --- daily downtime -------------------------------------------------------------------------
+
+ELEVEN = datetime(2026, 10, 5, 11, tzinfo=UTC).timestamp()
+
+
+def status(start_time: str, **extra: object) -> dict[str, object]:
+    return {"players": 21000, "server_version": "3000000", "start_time": start_time, **extra}
+
+
+def test_downtime_window_is_anchored_to_eleven_utc() -> None:
+    window = DowntimeWindow.on(ELEVEN + 3 * 3600)
+    assert window.watch_from == ELEVEN - 15 * 60
+    assert window.pause_from == ELEVEN - 2 * 60
+    assert window.restart_by == ELEVEN + 30 * 60
+    assert not window.watching(ELEVEN - 15 * 60 - 1) and window.watching(ELEVEN - 15 * 60)
+    assert not window.pausing(ELEVEN - 121) and window.pausing(ELEVEN - 120)
+    assert window.watching(ELEVEN + 30 * 60 - 1) and not window.watching(ELEVEN + 30 * 60)
+
+
+def test_pause_is_due_from_two_minutes_before_and_once_per_window() -> None:
+    policy = Policy()
+    assert not policy.downtime_due(ELEVEN - 121)
+    assert policy.downtime_due(ELEVEN - 120)
+    policy.pause_for_downtime(ELEVEN - 120, "daily downtime")
+    assert not policy.downtime_due(ELEVEN - 60)  # already paused
+    policy.resume_after_downtime(ELEVEN + 600)
+    assert not policy.downtime_due(ELEVEN + 660)  # resumed in this window
+    assert policy.downtime_due(ELEVEN + 86_400 - 60)  # tomorrow's window
+
+
+def test_server_errors_are_expected_only_in_the_window_or_while_paused() -> None:
+    policy = Policy()
+    assert not policy.outage_expected(ELEVEN - 15 * 60 - 1)
+    assert policy.outage_expected(ELEVEN - 15 * 60)
+    assert not policy.outage_expected(ELEVEN + 30 * 60)
+    policy.pause_for_downtime(ELEVEN, "HTTP 502")
+    assert policy.outage_expected(ELEVEN + 2 * 3600)  # a long downtime stays expected
+
+
+def test_server_up_needs_a_restart_inside_the_window_and_no_vip() -> None:
+    before = status("2026-10-04T11:05:00Z")
+    restarted = status("2026-10-05T11:06:12Z")
+    assert not server_up(before, ELEVEN + 600)
+    assert server_up(restarted, ELEVEN + 600)
+    assert not server_up(status("2026-10-05T11:06:12Z", vip=True), ELEVEN + 600)
+    assert server_up(before, ELEVEN + 30 * 60)  # past the deadline a healthy status will do
+    assert not server_up(status("not a date"), ELEVEN + 600)
+    assert not server_up(["not", "an", "object"], ELEVEN + 600)
+
+
+def test_expected_server_errors_leave_the_pace_alone_and_downtime_survives_a_restart() -> None:
+    policy = Policy(floor=0.05, spacing=0.05)
+    policy.observe("/characters/{id}", 502, {}, ELEVEN, expected=True)
+    assert policy.spacing == 0.05 and policy.slowdowns == 0
+    policy.observe("/characters/{id}", 502, {}, ELEVEN)
+    assert policy.spacing == 0.1 and policy.slowdowns == 1
+
+    policy.pause_for_downtime(ELEVEN - 120, "daily downtime at 11:00 UTC")
+    policy.status_checked_at = ELEVEN - 60
+    restored = Policy.from_dict(policy.to_dict())
+    assert restored.downtime_since == ELEVEN - 120
+    assert restored.downtime_reason == "daily downtime at 11:00 UTC"
+    assert restored.status_checked_at == ELEVEN - 60

@@ -218,6 +218,10 @@ Deliverables:
 - Adaptive ESI pace (decided 2026-10-07, design §11): 0.2 s spacing (0.05 s from 2026-10-08) when
   calm, doubling to 2 s on warning signs, logged and shown in `evedw esi
   status`; daily budget 300,000, raised to 800,000 on 2026-10-08; refresh slices of 5,000 every minute.
+- Daily downtime pause (decided 2026-10-08, design §11): ESI work pauses
+  from 10:58 UTC or the first server error from 10:45, `/status` once a
+  minute until the restarted server answers; what met the downtime stays
+  due. Shown in `evedw esi status`.
 - Live run: first affiliation cycle and alliance sweep; record change
   counts, crawl throughput and the first day's request mix in design §7.3.
 

@@ -30,6 +30,7 @@ from evedw.logs import log_context
 from evedw.sources.esi import (
     EsiBudgetError,
     EsiClient,
+    EsiDowntimeError,
     EsiPermanentError,
     EsiTransientError,
 )
@@ -322,6 +323,8 @@ class RefreshJob:
         self._report = SliceReport()
         registry = ctx.registry
         try:
+            # Before any work: a slice during downtime is one /status check at most.
+            self.esi.check_downtime()
             if self.populate:
                 today = self.today or self.now().date()
                 recent = ids_from_killmails(
@@ -335,6 +338,10 @@ class RefreshJob:
             self.drain(registry, cancel=ctx.check_cancelled)
         except (_OutOfBudget, EsiBudgetError) as exc:
             log.info("request budget spent: %s", str(exc) or "slice allowance")
+        except EsiDowntimeError as exc:
+            # Nothing was sent, so nothing failed: the entity or batch in hand stays due and
+            # the sweeps resume from their saved position once ESI is back.
+            log.info("slice ends early: %s", exc)
         r = self._report
         log.info(
             "refresh slice: %d alliances swept, %d characters checked, %d changes, "

@@ -7,13 +7,18 @@ Unix seconds, integers where they come from headers; the request spacing is frac
 The pace adapts (design §11): requests start ``floor`` seconds apart, the spacing doubles
 up to ``MAX_SPACING`` when ESI shows a warning sign, and halves back towards the floor
 after ``CALM_FOR`` seconds without one.
+
+EVE's daily downtime at 11:00 UTC pauses ESI work (design §11): from ``PAUSE_BEFORE``
+ahead of it, or from the first server error after ``WATCH_BEFORE`` ahead of it, until
+``/status`` shows a server started since the watch began. Server errors in that window
+are expected, not warning signs.
 """
 
 from collections.abc import Mapping
 from dataclasses import dataclass, field
-from datetime import date
+from datetime import UTC, date, datetime
 from email.utils import parsedate_to_datetime
-from typing import Any
+from typing import Any, cast
 
 LEGACY_ERROR_REMAIN = "x-esi-error-limit-remain"
 LEGACY_ERROR_RESET = "x-esi-error-limit-reset"
@@ -39,6 +44,68 @@ SLOW_DOWN_EVERY = 60.0
 
 CALM_FOR = 300.0
 """Seconds without a warning sign before the spacing halves back towards the floor."""
+
+DOWNTIME_AT = 11 * 3600
+"""EVE's daily downtime, in seconds after midnight UTC."""
+
+WATCH_BEFORE = 15 * 60
+"""From this long before downtime a server error means it has begun early."""
+
+PAUSE_BEFORE = 2 * 60
+"""From this long before downtime ESI work pauses anyway: downtime often starts a minute or
+two early, and two idle minutes a day cost less than a burst of failing requests."""
+
+RESTART_BY = 30 * 60
+"""Until this long after downtime, ESI work resumes only once the server has restarted.
+Later, a healthy ``/status`` is enough, so a day without a restart cannot pause for good."""
+
+STATUS_EVERY = 60.0
+"""Seconds between ``/status`` checks while paused for downtime."""
+
+
+@dataclass(frozen=True, slots=True)
+class DowntimeWindow:
+    """Today's downtime window in Unix seconds."""
+
+    watch_from: float
+    pause_from: float
+    restart_by: float
+
+    @classmethod
+    def on(cls, now: float) -> "DowntimeWindow":
+        midnight = now - now % 86_400
+        at = midnight + DOWNTIME_AT
+        return cls(at - WATCH_BEFORE, at - PAUSE_BEFORE, at + RESTART_BY)
+
+    def watching(self, now: float) -> bool:
+        """Inside the window, where a server error means downtime."""
+        return self.watch_from <= now < self.restart_by
+
+    def pausing(self, now: float) -> bool:
+        return self.pause_from <= now < self.restart_by
+
+
+def server_up(body: object, now: float) -> bool:
+    """Whether a ``/status`` body shows ESI back from downtime: not in VIP mode, and a
+    server started since today's watch began (or the restart deadline has passed)."""
+    if not isinstance(body, Mapping):
+        return False
+    status = cast(Mapping[str, object], body)
+    if status.get("vip") is True:
+        return False
+    window = DowntimeWindow.on(now)
+    if not window.watching(now):
+        return True
+    started = status.get("start_time")
+    if not isinstance(started, str):
+        return False
+    try:
+        start = datetime.fromisoformat(started.replace("Z", "+00:00"))
+    except ValueError:
+        return False
+    if start.tzinfo is None:
+        start = start.replace(tzinfo=UTC)
+    return start.timestamp() >= window.watch_from
 
 
 def header(headers: Mapping[str, str], name: str) -> str | None:
@@ -144,6 +211,12 @@ class Policy:
     pauses: int = 0
     budget_day: str | None = None
     budget_used: int = 0
+    downtime_since: float = 0
+    """When ESI work paused for downtime, or 0 when it is not paused."""
+    downtime_reason: str | None = None
+    status_checked_at: float = 0
+    resumed_at: float = 0
+    """When the last downtime pause ended; stops a second pause in the same window."""
 
     # -- serialisation -------------------------------------------------------------------
 
@@ -165,6 +238,10 @@ class Policy:
             "pauses": self.pauses,
             "budget_day": self.budget_day,
             "budget_used": self.budget_used,
+            "downtime_since": self.downtime_since,
+            "downtime_reason": self.downtime_reason,
+            "status_checked_at": self.status_checked_at,
+            "resumed_at": self.resumed_at,
         }
 
     @classmethod
@@ -178,6 +255,7 @@ class Policy:
             if isinstance(value, Mapping):
                 buckets[str(key)] = Bucket.from_dict(value)
         budget_day = raw.get("budget_day")
+        downtime_reason = raw.get("downtime_reason")
         return cls(
             stopped=str(stopped) if stopped else None,
             next_request=float(raw.get("next_request", 0)),
@@ -195,6 +273,10 @@ class Policy:
             pauses=int(raw.get("pauses", 0)),
             budget_day=str(budget_day) if budget_day else None,
             budget_used=int(raw.get("budget_used", 0)),
+            downtime_since=float(raw.get("downtime_since", 0)),
+            downtime_reason=str(downtime_reason) if downtime_reason else None,
+            status_checked_at=float(raw.get("status_checked_at", 0)),
+            resumed_at=float(raw.get("resumed_at", 0)),
         )
 
     # -- budget --------------------------------------------------------------------------
@@ -255,15 +337,50 @@ class Policy:
             self.spacing = max(self.floor, self.spacing / 2)
             self.paced_at = now
 
-    def observe(self, route: str, status: int, headers: Mapping[str, str], at: float) -> str | None:
+    # -- downtime ------------------------------------------------------------------------
+
+    def downtime_due(self, now: float) -> bool:
+        """Whether ESI work should pause for downtime now without waiting for an error."""
+        window = DowntimeWindow.on(now)
+        return (
+            not self.downtime_since and window.pausing(now) and self.resumed_at < window.watch_from
+        )
+
+    def outage_expected(self, now: float) -> bool:
+        """Whether a server error now is downtime rather than a warning sign."""
+        return bool(self.downtime_since) or DowntimeWindow.on(now).watching(now)
+
+    def pause_for_downtime(self, now: float, reason: str) -> None:
+        """The first ``/status`` check comes a minute later: the server is going down or
+        has just answered with an error, so an immediate check would only fail."""
+        self.downtime_since = now
+        self.downtime_reason = reason
+        self.status_checked_at = now
+
+    def resume_after_downtime(self, now: float) -> None:
+        self.downtime_since = 0
+        self.downtime_reason = None
+        self.resumed_at = now
+
+    def observe(
+        self,
+        route: str,
+        status: int,
+        headers: Mapping[str, str],
+        at: float,
+        *,
+        expected: bool = False,
+    ) -> str | None:
         """Update cooldowns and the pace from a response. Every branch only extends
-        ``blocked_until``. Returns the warning sign seen, if any."""
+        ``blocked_until``. Returns the warning sign seen, if any. ``expected`` marks a
+        server error during downtime: it leaves the pace alone."""
         now = int(at)
-        warning = self._warning(status, headers)
-        if warning is None:
-            self.relax(at)
-        else:
-            self.warn(at)
+        warning = None if expected else self._warning(status, headers)
+        if not expected:
+            if warning is None:
+                self.relax(at)
+            else:
+                self.warn(at)
         self.next_request = at + self.pace()
 
         retry_after = header(headers, "retry-after")

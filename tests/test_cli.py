@@ -64,6 +64,7 @@ def test_entities_and_esi_status(data_dir: Path) -> None:
     result = runner.invoke(app, ["--data-dir", str(data_dir), "esi", "status"])
     assert result.exit_code == 0, result.output
     assert "stopped        no" in result.output
+    assert "downtime       no" in result.output
     assert "0 of 800000 used" in result.output
     assert "pace           1.00s between requests (calm 0.05s)" in result.output
 

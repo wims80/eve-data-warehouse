@@ -609,6 +609,14 @@ def esi_status(ctx: typer.Context) -> None:
     print(f"stopped        {policy.stopped or 'no'}")
     blocked = policy.blocked_until - now
     print(f"blocked        {f'{blocked}s' if blocked > 0 else 'no'}")
+    if policy.downtime_since:
+        since = datetime.fromtimestamp(policy.downtime_since, tz=UTC)
+        print(f"downtime       paused since {since:%H:%M:%S} UTC ({policy.downtime_reason})")
+    elif policy.resumed_at:
+        resumed = datetime.fromtimestamp(policy.resumed_at, tz=UTC)
+        print(f"downtime       no; last resumed {resumed:%Y-%m-%d %H:%M} UTC")
+    else:
+        print("downtime       no")
     print(
         f"pace           {max(policy.spacing, settings.esi_spacing):.2f}s between requests "
         f"(calm {settings.esi_spacing:.2f}s), {policy.slowdowns} slowdowns"
