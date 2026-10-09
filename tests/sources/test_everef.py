@@ -16,7 +16,7 @@ from evedw.sources.everef import (
     normalize_etag,
     parse_timestamp,
 )
-from tests.helpers import BASE_URL, FakeEveRef, market_csv_bz2, md5
+from tests.helpers import BASE_URL, FakeEveRef, market_csv_bz2, md5, publish_three_days
 
 
 @pytest.fixture
@@ -38,7 +38,12 @@ def sleeps() -> list[float]:
 @pytest.fixture
 def client(sleeps: list[float]) -> Iterator[EveRefClient]:
     c = EveRefClient(
-        BASE_URL, client=httpx.Client(), attempts=3, backoff_seconds=0.0, sleep=sleeps.append
+        BASE_URL,
+        client=httpx.Client(),
+        attempts=3,
+        backoff_seconds=0.0,
+        sleep=sleeps.append,
+        spacing=0.0,
     )
     yield c
     c.close()
@@ -251,3 +256,23 @@ def test_failed_head_keeps_index_metadata_instead_of_failing(
     a, b = client.refresh_headers([obj("a"), obj("b")])
     assert a.etag == "index-etag" and a.size == 10
     assert b.etag == "served" and b.size == 11
+
+
+def test_requests_start_at_least_spacing_apart(fake: FakeEveRef) -> None:
+    now = [100.0]
+    slept: list[float] = []
+
+    def sleep(seconds: float) -> None:
+        slept.append(seconds)
+        now[0] += seconds
+
+    client = EveRefClient(
+        BASE_URL, client=httpx.Client(), sleep=sleep, spacing=0.5, clock=lambda: now[0]
+    )
+    publish_three_days(fake)
+    client.totals(MARKET_HISTORY)
+    client.totals(MARKET_HISTORY)
+    now[0] += 2.0  # a pause longer than the spacing costs nothing
+    client.totals(MARKET_HISTORY)
+    client.close()
+    assert slept == [0.5]

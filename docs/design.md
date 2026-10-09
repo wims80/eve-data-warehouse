@@ -344,11 +344,18 @@ discover   fetch per-year index.json for the object listing, then HEAD a
            2.1). The set is: every object inside an explicit date range,
            every object not yet in the registry, every object still pending
            (it is about to be downloaded), every object whose index
-           entry differs from the registry, every object younger than
-           `EVEDW_HEAD_DAYS` (default 120), and on a sweep every object.
+           entry differs from the registry while its year's listing has
+           changed, every object younger than
+           `EVEDW_HEAD_DAYS` (default 30; 120 until 2026-10-09, about 1,200
+           HEADs a day; older rewrites are caught by the weekly sweep), and
+           on a sweep every object.
            HEADs run two at a time, as EVE Ref's download guide does
-           (`rclone --checkers 2`); a full killmail sweep is about 7,000
-           requests. A 429 waits for `Retry-After`, at least 30 seconds,
+           (`rclone --checkers 2`), and every EVE Ref request starts at
+           least `EVEDW_EVEREF_SPACING` (0.5 s) after the previous one,
+           across both: at full speed two back-to-back syncs drew 429s
+           around their 55th request (2026-10-09). A sync of about 55
+           requests takes about 30 s; a full killmail sweep is about 7,000
+           requests, about an hour. A 429 waits for `Retry-After`, at least 30 seconds,
            doubling per attempt. A file whose HEAD still fails keeps its
            index metadata for this run, so one file cannot fail discovery;
            measured 2026-10-07, eight concurrent HEADs drew 429s from EVE
@@ -357,6 +364,25 @@ discover   fetch per-year index.json for the object listing, then HEAD a
            because the index carries milliseconds and HTTP dates do not.
            Entries that vanished -> `gone` (data stays). Refresh
            expected_count from totals.json.
+           Listings (every year's index.json, totals.json, the backfill
+           listing) are conditional GETs (decided 2026-10-09): the last body
+           and its ETag and Last-Modified live in the store's response
+           cache, the request carries `If-None-Match` and
+           `If-Modified-Since`, and a 304 reuses the cached body. EVE Ref's
+           Cloudflare front weakens the ETag (`W/"..."`) of a body it
+           compresses and then ignores the weak form, so the strong form is
+           sent; the tag is the file's content hash (checked 2026-10-09: the
+           weak tag drew a 200, the strong tag and the date each a 304). Every
+           year is still read on every sync; an unchanged one costs a
+           request but no download (a killmail year's index is about
+           117 KB). An entry of an unchanged listing that still differs
+           from the registry (EVE Ref regenerates past indexes months late)
+           is the one HEAD checked when the listing last changed, so it
+           takes the registry's file metadata instead of another HEAD;
+           before, about 30 such killmail days were HEADed on every sync.
+           A listing that answers 404 drops its cached body. Each
+           sync logs `EVE Ref traffic: N listing requests (M answered 304),
+           H HEADs, D downloads`.
 fetch      skip an object whose live revision already has its etag under
            the current parser_version (an identical rewrite upstream only
            moves Last-Modified); mark it `imported` again, unless forced.
@@ -771,8 +797,9 @@ should read the lake directly (see `docs/consumers.md`).
 - `EntityStore`: `upsert(table, arrow_table)` with the newer-observation
   rule of section 7.3, `lookup(table, ids)`, `ids(table, ...)` for
   cursors over live entities, `count(table)`, `export_parquet(dir)`.
-- `ResponseCache`: `get(key)`, `put(entry)`, `delete(key)`; the ESI client's
-  body and validator store. In DuckDB it is the `esi_cache` table.
+- `ResponseCache`: `get(key)`, `put(entry)`, `delete(key)`; the body and
+  validator store of the ESI client and of EVE Ref listings (section 6),
+  keyed apart. In DuckDB it is the `esi_cache` table.
 - `Queries`: `names()`, `describe(name)`, `run(name, params) -> pyarrow.Table`
   with `params` as the raw strings of a query string, converted by the
   declared kinds.
@@ -912,12 +939,12 @@ else the current directory. `.env` is read from the home, and a relative
 resolves against the current directory, where it was typed.
 Keys: `DATA_DIR`, `BIND`, `MIN_FREE_GB`, `ESI_CONTACT`, `ESI_DAILY_BUDGET`, `ESI_SPACING`,
 `ESI_COMPATIBILITY_DATE`, `ESI_REFRESH_INTERVAL`, `ESI_RECENT_DAYS`,
-`EVEREF_BASE_URL`, `ESI_BASE_URL`, `SYNC_INTERVAL_KILLMAILS`,
+`EVEREF_BASE_URL`, `EVEREF_SPACING`, `ESI_BASE_URL`, `SYNC_INTERVAL_KILLMAILS`,
 `SYNC_INTERVAL_MARKET`, `SWEEP_INTERVAL`, `REFRESH_INTERVAL`, `REFRESH_SLICE`,
 `EXPORT_INTERVAL`, `SEED_INTERVAL`, `ALLIANCE_SWEEP_INTERVAL`,
 `AFFILIATION_CYCLE`, `VERIFY_INTERVAL`, `HEAD_DAYS`, `LOG_LEVEL`.
 Intervals are seconds in the environment. Base URLs are overridable so tests
-can point at a local fixture server.
+can point at a local fixture server. `HEAD_DAYS` defaults to 30 (section 6).
 
 ## 14. Tooling
 

@@ -255,7 +255,8 @@ class EntityStore(Protocol):
 
 @dataclass(frozen=True, slots=True)
 class CachedResponse:
-    """One cached ESI response: the body plus the validators for a conditional request."""
+    """One cached response, ESI or an EVE Ref listing: the body plus the validators for a
+    conditional request."""
 
     key: str
     status: int
@@ -268,7 +269,7 @@ class CachedResponse:
 
 
 class ResponseCache(Protocol):
-    """Persistent response cache keyed by request. The ESI client is its only user."""
+    """Persistent response cache keyed by request: ESI responses and EVE Ref listings."""
 
     def get(self, key: str) -> CachedResponse | None: ...
 

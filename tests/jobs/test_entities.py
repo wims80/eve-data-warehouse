@@ -240,6 +240,7 @@ def test_seed_job_registers_archive_and_is_idempotent(env: SyncEnv, entities: En
     assert fake.hits[f"GET /characters-corporations-alliances/backfills/{ARCHIVE.name}"] == 1
 
 
+@pytest.mark.duckdb_only  # the catalog opens the real response cache for EVE Ref listings
 def test_seed_all_imports_every_unseeded_archive_through_the_catalog(
     env: SyncEnv, entities: EntityStore
 ) -> None:

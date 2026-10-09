@@ -4,12 +4,18 @@ EVE Ref publishes ``<dataset>/<year>/index.json`` listing every file with ``etag
 ``size`` and ``last_modified``. That listing is the change feed; the download verifies the
 served file against the listing so a file rewritten between discovery and fetch is
 detected rather than imported under stale metadata.
+
+Listings (year indexes, ``totals.json``, directory pages) are fetched with conditional
+GETs when a ``ResponseCache`` is given (design §6): the last body and its validators are
+kept, and a ``304`` reuses the body, so an unchanged year costs a request but no download.
 """
 
 import hashlib
+import json
 import logging
 import os
 import random
+import threading
 import time
 from collections.abc import Callable, Iterable
 from concurrent.futures import ThreadPoolExecutor
@@ -25,6 +31,7 @@ import httpx
 from evedw import __version__
 from evedw.domain.datasets import Dataset
 from evedw.domain.registry import DiscoveredObject
+from evedw.store.base import CachedResponse, ResponseCache
 
 log = logging.getLogger(__name__)
 
@@ -33,6 +40,9 @@ RATE_LIMITED_WAIT = 30.0
 """Least wait after a 429 without a usable ``Retry-After``, doubled per attempt."""
 CONCURRENCY = 2
 """Requests in flight at once. EVE Ref's download guide uses ``rclone --checkers 2``."""
+SPACING = 0.5
+"""Least seconds between request starts, across threads. At full speed a sync's ~55 requests
+drew 429s from EVE Ref's Cloudflare front around the 55th (2026-10-09)."""
 
 
 class UpstreamChangedError(RuntimeError):
@@ -61,6 +71,38 @@ def _retryable(response: httpx.Response) -> _Retryable:
                 retry_after = max(0.0, (when - datetime.now(UTC)).total_seconds())
         retry_after = max(retry_after or 0.0, RATE_LIMITED_WAIT)
     return _Retryable(f"HTTP {response.status_code}", retry_after=retry_after)
+
+
+@dataclass(frozen=True, slots=True)
+class Traffic:
+    """Requests a client has sent, for the sync log line."""
+
+    listings: int = 0
+    """Listing GETs: year indexes, totals, directory pages."""
+    not_modified: int = 0
+    """Listing GETs answered 304, whose cached body was reused."""
+    heads: int = 0
+    downloads: int = 0
+    """File GETs, retries included."""
+
+    def since(self, earlier: "Traffic") -> "Traffic":
+        return Traffic(
+            self.listings - earlier.listings,
+            self.not_modified - earlier.not_modified,
+            self.heads - earlier.heads,
+            self.downloads - earlier.downloads,
+        )
+
+    def describe(self) -> str:
+        return (
+            f"{self.listings} listing requests ({self.not_modified} answered 304), "
+            f"{self.heads} HEADs, {self.downloads} downloads"
+        )
+
+
+def listing_key(url: str) -> str:
+    """Response cache key of a listing; distinct from every ESI key."""
+    return hashlib.sha256(json.dumps(["everef", "GET", url]).encode("utf-8")).hexdigest()
 
 
 @dataclass(frozen=True, slots=True)
@@ -189,7 +231,11 @@ class EveRefClient:
         attempts: int = 5,
         backoff_seconds: float = 1.0,
         sleep: Callable[[float], None] = time.sleep,
+        cache: ResponseCache | None = None,
+        spacing: float = SPACING,
+        clock: Callable[[], float] = time.monotonic,
     ) -> None:
+        """``cache`` keeps listing bodies for conditional GETs; the client closes it."""
         self.base_url = base_url.rstrip("/")
         self._owns_client = client is None
         self._client = client or httpx.Client(
@@ -200,32 +246,71 @@ class EveRefClient:
         self._attempts = attempts
         self._backoff = backoff_seconds
         self._sleep = sleep
+        self._cache = cache
+        self._traffic = Traffic()
+        self._traffic_lock = threading.Lock()
+        self._spacing = spacing
+        self._clock = clock
+        self._next_start = 0.0
+        self._pace_lock = threading.Lock()
 
     def close(self) -> None:
         if self._owns_client:
             self._client.close()
+        if self._cache is not None:
+            self._cache.close()
+
+    @property
+    def traffic(self) -> Traffic:
+        with self._traffic_lock:
+            return self._traffic
+
+    def _pace(self) -> None:
+        """Wait for this request's start slot: one every ``spacing`` seconds, whichever
+        thread asks. The slot is taken under the lock and waited for outside it."""
+        with self._pace_lock:
+            now = self._clock()
+            start = max(now, self._next_start)
+            self._next_start = start + self._spacing
+        if start > now:
+            self._sleep(start - now)
+
+    def _count(self, **fields: int) -> None:
+        with self._traffic_lock:
+            self._traffic = replace(
+                self._traffic,
+                **{name: getattr(self._traffic, name) + n for name, n in fields.items()},
+            )
 
     # -- discovery -----------------------------------------------------------------------
 
     def year_index(self, dataset: Dataset, year: int) -> list[IndexEntry] | None:
         """Entries listed for a year, or ``None`` when the year has no index (404)."""
+        found = self._year_index(dataset, year)
+        return None if found is None else found[0]
+
+    def _year_index(self, dataset: Dataset, year: int) -> tuple[list[IndexEntry], bool] | None:
         url = dataset.index_url(self.base_url, year)
-        response = self._get(url)
-        if response is None:
+        fetched = self._listing(url)
+        if fetched is None:
             return None
-        return self._index_entries(response.json(), url)
+        text, unchanged = fetched
+        return self._index_entries(json.loads(text), url), unchanged
 
     def listing(self, dataset: Dataset) -> list[IndexEntry]:
         """Entries of a directory that has no per-year index. ``index.json`` is tried
         first; EVE Ref's HTML directory listing is the fallback."""
+        return self._directory(dataset)[0]
+
+    def _directory(self, dataset: Dataset) -> tuple[list[IndexEntry], bool]:
         base = dataset.listing_url(self.base_url)
-        response = self._get(base + "index.json")
-        if response is not None:
-            return self._index_entries(response.json(), base + "index.json")
-        response = self._get(base)
-        if response is None:
-            return []
-        return parse_html_listing(response.text, base)
+        fetched = self._listing(base + "index.json")
+        if fetched is not None:
+            return self._index_entries(json.loads(fetched[0]), base + "index.json"), fetched[1]
+        fetched = self._listing(base)
+        if fetched is None:
+            return [], False
+        return parse_html_listing(fetched[0], base), fetched[1]
 
     @staticmethod
     def _index_entries(payload: Any, url: str) -> list[IndexEntry]:
@@ -259,10 +344,10 @@ class EveRefClient:
         """Expected record counts keyed as the dataset's totals.json keys them."""
         if dataset.totals_path is None:
             return {}
-        response = self._get(dataset.totals_url(self.base_url))
-        if response is None:
+        fetched = self._listing(dataset.totals_url(self.base_url))
+        if fetched is None:
             return {}
-        payload: Any = response.json()
+        payload: Any = json.loads(fetched[0])
         if not isinstance(payload, dict):
             return {}
         result: dict[str, int] = {}
@@ -274,18 +359,18 @@ class EveRefClient:
     def discover(self, dataset: Dataset, years: Iterable[int]) -> list[DiscoveredObject]:
         totals = self.totals(dataset)
         found: list[DiscoveredObject] = []
-        listed: list[tuple[int | None, list[IndexEntry]]]
+        listed: list[tuple[int | None, list[IndexEntry], bool]]
         if dataset.index_path is None:
-            listed = [(None, self.listing(dataset))]
+            listed = [(None, *self._directory(dataset))]
         else:
             listed = []
             for year in years:
-                entries = self.year_index(dataset, year)
-                if entries is None:
+                indexed = self._year_index(dataset, year)
+                if indexed is None:
                     log.info("no index for year %d", year)
                     continue
-                listed.append((year, entries))
-        for year, entries in listed:
+                listed.append((year, *indexed))
+        for year, entries, unchanged in listed:
             for entry in entries:
                 day = dataset.logical_date(entry.name)
                 if day is None:
@@ -303,6 +388,7 @@ class EveRefClient:
                         size=entry.size,
                         last_modified=entry.last_modified,
                         expected_count=expected,
+                        listing_unchanged=unchanged,
                     )
                 )
         return found
@@ -322,7 +408,7 @@ class EveRefClient:
 
         def refresh(obj: DiscoveredObject) -> DiscoveredObject:
             try:
-                response = self._request("HEAD", obj.url)
+                response = self._request("HEAD", obj.url, count="heads")
             except DownloadError as exc:
                 # One unreachable file must not fail the whole discovery; the download
                 # checks the served etag anyway, and the next sync checks it again.
@@ -392,6 +478,8 @@ class EveRefClient:
     ) -> Download:
         digest = hashlib.sha256()
         written = 0
+        self._count(downloads=1)
+        self._pace()
         with self._client.stream("GET", url) as response:
             if response.status_code in RETRY_STATUS:
                 raise _retryable(response)
@@ -430,17 +518,67 @@ class EveRefClient:
 
     # -- http ----------------------------------------------------------------------------
 
-    def _get(self, url: str) -> httpx.Response | None:
-        """GET with retries. Returns ``None`` on 404."""
-        return self._request("GET", url)
+    def _listing(self, url: str) -> tuple[str, bool] | None:
+        """A listing body and whether it was answered 304, or ``None`` on 404. With a cache
+        the GET is conditional and a ``304`` returns the cached body."""
+        key = listing_key(url)
+        cached = self._cache.get(key) if self._cache is not None else None
+        headers: dict[str, str] = {}
+        if cached is not None:
+            if cached.etag:
+                # Cloudflare weakens the ETag of a body it compresses on the fly and then
+                # ignores the weak form in If-None-Match (checked 2026-10-09); the tag is
+                # the file's content hash, so its strong form is the right validator.
+                headers["If-None-Match"] = cached.etag.removeprefix("W/")
+            if cached.last_modified:
+                headers["If-Modified-Since"] = cached.last_modified
+        response = self._request("GET", url, headers=headers, count="listings")
+        if response is None:
+            if self._cache is not None and cached is not None:
+                self._cache.delete(key)
+            return None
+        if response.status_code == 304:
+            if cached is None:
+                raise DownloadError(f"{url}: 304 without a cached body")
+            self._count(not_modified=1)
+            return cached.body, True
+        text = response.text
+        if self._cache is not None:
+            now = datetime.now(UTC)
+            self._cache.put(
+                CachedResponse(
+                    key=key,
+                    status=response.status_code,
+                    body=text,
+                    etag=response.headers.get("ETag"),
+                    last_modified=response.headers.get("Last-Modified"),
+                    cache_control=response.headers.get("Cache-Control"),
+                    observed_at=now,
+                    expires_at=now,  # always revalidated
+                )
+            )
+        return text, False
 
-    def _request(self, method: str, url: str) -> httpx.Response | None:
+    def _request(
+        self,
+        method: str,
+        url: str,
+        *,
+        headers: dict[str, str] | None = None,
+        count: str | None = None,
+    ) -> httpx.Response | None:
+        """With retries. Returns ``None`` on 404; a ``304`` is returned as is."""
         last_error: Exception | None = None
         for attempt in range(self._attempts):
             try:
-                response = self._client.request(method, url)
+                if count is not None:
+                    self._count(**{count: 1})
+                self._pace()
+                response = self._client.request(method, url, headers=headers)
                 if response.status_code == 404:
                     return None
+                if response.status_code == 304:
+                    return response
                 if response.status_code in RETRY_STATUS:
                     raise _retryable(response)
                 response.raise_for_status()

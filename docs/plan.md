@@ -1,8 +1,8 @@
 # Implementation plan
 
 Status: M0 to M5 complete (2026-10-07), M6 (entity coverage) complete
-(2026-10-09). M7 (gentler EVE Ref traffic) and M8 (entity discovery and
-manual add) not started; each starts once the previous one is accepted.
+(2026-10-09). M7 (gentler EVE Ref traffic) code done, live acceptance in
+progress. M8 (entity discovery and manual add) starts once M7 is accepted.
 
 Milestones are ordered so that each one leaves a working, testable system.
 Do not start a milestone before the previous one's acceptance checks pass.
@@ -243,7 +243,7 @@ recent killmails are no longer asked again every slice.
 
 ## M7. Gentler EVE Ref traffic
 
-Not started. Starts once M6 is accepted.
+Code done 2026-10-09; live acceptance in progress.
 
 EVE Ref's download guide asks clients to use `etag`, `last-modified` and
 `content-length` to avoid downloading the same data twice, and uses two

@@ -312,6 +312,22 @@ requests on 2026-10-08). Repeated slowdowns, or
 a refresh slice ending early on `100 ESI errors`, mean something is sending
 bad requests: stop the service and find it before raising the pace again.
 
+## EVE Ref traffic
+
+Each sync reads every year's index and `totals.json` with a conditional GET,
+so an unchanged one is answered `304` from the cached body, and HEADs only
+the files of the last `EVEDW_HEAD_DAYS` (30) days plus anything new, pending
+or changed; the weekly sweep HEADs everything (design §6). Each sync logs
+its traffic:
+
+```
+journalctl --user -u evedw -o cat | /usr/bin/grep "EVE Ref traffic" | tail
+```
+
+Requests start at least `EVEDW_EVEREF_SPACING` (0.5 s) apart, two in
+flight at most. A `429` from EVE Ref's Cloudflare front is retried after
+`Retry-After`, at least 30 seconds, doubling per attempt.
+
 ## ESI downtime
 
 ESI work pauses every day around EVE's downtime at 11:00 UTC (design §11):

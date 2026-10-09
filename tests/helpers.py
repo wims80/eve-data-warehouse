@@ -85,6 +85,10 @@ class FakeEveRef:
         """Days whose index entry still describes these older bytes."""
         self.hits: Counter[str] = Counter()
         """Request counts keyed by ``"<METHOD> <path>"``."""
+        self.not_modified: Counter[str] = Counter()
+        """Listing GETs answered 304, keyed like ``hits``."""
+        self.listing_modified: dict[str, str] = {}
+        """Last-Modified per listing path; a fixed date unless set."""
         self.missing_years: set[int] = set()
         router.route(method__in=["GET", "HEAD"], url__regex=rf"{base_url}/{self.prefix}/.*").mock(
             side_effect=self._handle
@@ -122,7 +126,7 @@ class FakeEveRef:
         self.hits[f"{request.method} {path}"] += 1
         parts = path.strip("/").split("/")
         if parts[-1] == "totals.json":
-            return httpx.Response(200, json=self.totals)
+            return self._listing(request, json.dumps(self.totals).encode())
         if parts[-1] == "index.json":
             year = int(parts[-2])
             if year in self.missing_years:
@@ -143,7 +147,7 @@ class FakeEveRef:
                 if day.year == year
             ]
             body = {"files": entries, "path": f"{self.prefix}/{year}"}
-            return httpx.Response(200, content=json.dumps(body).encode())
+            return self._listing(request, json.dumps(body).encode())
         for day, data in self.files.items():
             if parts[-1] == self.name_for(day):
                 # HEAD describes the published file; serve_instead only affects the GET body,
@@ -158,6 +162,21 @@ class FakeEveRef:
                     return httpx.Response(200, headers=headers)
                 return httpx.Response(200, content=body, headers=headers)
         return httpx.Response(404)
+
+    def _listing(self, request: httpx.Request, body: bytes) -> httpx.Response:
+        """A listing with validators as EVE Ref's Cloudflare front serves them: the ETag
+        is weakened because the body is compressed, and only its strong form or a matching
+        If-Modified-Since earns a 304."""
+        etag = f'"{md5(body)}"'
+        modified = self.listing_modified.get(request.url.path, "Mon, 05 Oct 2026 12:00:00 GMT")
+        headers = {"ETag": f"W/{etag}", "Last-Modified": modified}
+        if request.headers.get("If-None-Match") == etag or (
+            "If-None-Match" not in request.headers
+            and request.headers.get("If-Modified-Since") == modified
+        ):
+            self.not_modified[f"{request.method} {request.url.path}"] += 1
+            return httpx.Response(304, headers={"ETag": etag})
+        return httpx.Response(200, content=body, headers=headers)
 
 
 TODAY = date(2026, 10, 5)

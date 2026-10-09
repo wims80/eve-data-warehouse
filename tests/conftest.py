@@ -39,7 +39,7 @@ def settings(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Settings:
     # Keep the real .env and environment out of tests.
     for key in [k for k in os.environ if k.startswith("EVEDW_") and k != "EVEDW_HOME"]:
         monkeypatch.delenv(key)
-    return Settings(data_dir=tmp_path / "data", _env_file=None)  # type: ignore[call-arg]
+    return Settings(data_dir=tmp_path / "data", everef_spacing=0.0, _env_file=None)  # type: ignore[call-arg]
 
 
 @pytest.fixture(params=BACKENDS)

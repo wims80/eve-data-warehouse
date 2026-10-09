@@ -42,6 +42,8 @@ class Settings(BaseSettings):
     """Killmail days scanned for entity IDs when the refresh queue is populated."""
 
     everef_base_url: str = "https://data.everef.net"
+    everef_spacing: float = 0.5
+    """Least seconds between EVE Ref request starts (design §6)."""
     esi_base_url: str = "https://esi.evetech.net"
 
     sync_interval_killmails: timedelta = Field(default=timedelta(hours=6))
@@ -59,7 +61,7 @@ class Settings(BaseSettings):
     affiliation_cycle: timedelta = Field(default=timedelta(days=7))
     """How often every live character's corporation is checked, 1,000 per request."""
     verify_interval: timedelta = Field(default=timedelta(days=7))
-    head_days: int = 120
+    head_days: int = 30
     """Days back from today whose file headers are re-checked on every sync."""
 
     log_level: str = "INFO"

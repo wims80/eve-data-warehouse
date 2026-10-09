@@ -7,7 +7,7 @@ The loop is the same for every index-driven dataset. What differs per dataset is
 import logging
 import shutil
 from collections.abc import Iterable
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import UTC, date, datetime, timedelta
 from pathlib import Path
 from typing import Protocol
@@ -97,7 +97,7 @@ class SyncJob:
     date_to: date | None = None
     force: bool = False
     today: date | None = None
-    head_days: int = 120
+    head_days: int = 30
     """Objects younger than this always get their file headers refreshed."""
     sweep: bool = False
     """Refresh headers of every object, catching rewrites of old days."""
@@ -108,7 +108,11 @@ class SyncJob:
 
     def __call__(self, ctx: RunContext) -> JobOutcome:
         with log_context(dataset=self.dataset.name):
-            return self._run(ctx)
+            before = self.client.traffic
+            try:
+                return self._run(ctx)
+            finally:
+                log.info("EVE Ref traffic: %s", self.client.traffic.since(before).describe())
 
     # -- discovery -----------------------------------------------------------------------
 
@@ -171,6 +175,7 @@ class SyncJob:
         tail_start = today - timedelta(days=self.head_days)
         ranged = self.date_from is not None or self.date_to is not None
         existing = {o.object_key: o for o in ctx.registry.objects(dataset=self.dataset.name)}
+        found = list(found)
         selected: list[int] = []
         for index, obj in enumerate(found):
             if ranged:
@@ -183,10 +188,20 @@ class SyncJob:
                 self.sweep
                 or known is None
                 or known.status in PENDING_STATUSES
-                or known.differs_from(obj)
+                or (known.differs_from(obj) and not obj.listing_unchanged)
                 or (obj.logical_date is not None and obj.logical_date >= tail_start)
             ):
                 selected.append(index)
+            elif known.differs_from(obj):
+                # The listing answered 304, so this lagging entry is the one the last
+                # changed listing showed, and HEAD checked the file then: the registry holds
+                # what the file said, which is what a HEAD would say now.
+                found[index] = replace(
+                    obj,
+                    etag=known.upstream_etag,
+                    size=known.upstream_size,
+                    last_modified=known.upstream_last_modified,
+                )
         if not selected:
             return found
         log.info("refreshing headers of %d of %d objects", len(selected), len(found))

@@ -188,7 +188,13 @@ class JobCatalog:
             )
 
     def _everef(self) -> EveRefClient:
-        return EveRefClient(self.settings.everef_base_url, contact=self.settings.esi_contact)
+        """Listings are revalidated against the store's response cache (design §6)."""
+        return EveRefClient(
+            self.settings.everef_base_url,
+            contact=self.settings.esi_contact,
+            cache=open_response_cache(self.settings),
+            spacing=self.settings.everef_spacing,
+        )
 
     def _esi(self) -> EsiClient:
         settings = self.settings

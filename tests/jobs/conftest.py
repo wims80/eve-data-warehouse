@@ -19,7 +19,7 @@ def env(settings: Settings, registry: Registry) -> Iterator[SyncEnv]:
     with respx.mock(assert_all_called=False) as router:
         fake = FakeEveRef(router, MARKET_HISTORY)
         client = EveRefClient(
-            BASE_URL, client=httpx.Client(), backoff_seconds=0.0, sleep=lambda _: None
+            BASE_URL, client=httpx.Client(), backoff_seconds=0.0, sleep=lambda _: None, spacing=0.0
         )
         with WriterLock(settings.lock_path) as lock:
             yield SyncEnv(settings, registry, open_lake(settings), lock, client, fake, router)

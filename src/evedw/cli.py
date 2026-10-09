@@ -398,7 +398,13 @@ def verify(
     registry = open_registry(settings, read_only=True)
     lake = open_lake(settings)
     client = (
-        None if offline else EveRefClient(settings.everef_base_url, contact=settings.esi_contact)
+        None
+        if offline
+        else EveRefClient(
+            settings.everef_base_url,
+            contact=settings.esi_contact,
+            spacing=settings.everef_spacing,
+        )
     )
     failed = False
     try:
