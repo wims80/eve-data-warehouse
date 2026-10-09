@@ -27,7 +27,7 @@ from tests.helpers import TODAY, SyncEnv
 
 TODAY_AT = datetime(2026, 10, 5, 12, tzinfo=UTC)
 SEEDED_AT = datetime(2026, 5, 10, tzinfo=UTC)
-FOCUS, CHANGE, ACTIVE, IDLE, CRAWL = (int(c) for c in RefreshClass)
+FOCUS, CHANGE, ACTIVE, IDLE, CRAWL, DEFERRED = (int(c) for c in RefreshClass)
 
 
 # --- fixtures and helpers -----------------------------------------------------------------
@@ -769,3 +769,38 @@ def test_focus_on_a_corporation_queues_its_known_characters_without_requests(
         ("corporation", 98000030): FOCUS,
         ("character", 90000059): FOCUS,  # a settled entry is pulled forward
     }
+
+
+# --- deleted characters wait behind the crawl ---------------------------------------------
+
+
+def test_deleted_characters_are_crawled_last_and_still_requested(
+    env: SyncEnv, entities: EntityStore, esi: tuple[FakeEsi, FakeClock, EsiClient]
+) -> None:
+    fake, _, client = esi
+    seed_characters(
+        entities,
+        {"character_id": 90000001, "deleted": True},
+        {"character_id": 90000059},
+    )
+    fake.put("/characters/90000001/corporationhistory", {"error": "deleted"}, status=404)
+    fake.put("/characters/90000059/corporationhistory", [])
+    env.registry.refresh_push(
+        [
+            RefreshEntry("character", 90000001, priority=CRAWL, next_due_at=TODAY_AT),
+            RefreshEntry("character", 90000059, priority=CRAWL, next_due_at=TODAY_AT),
+        ]
+    )
+
+    # With room for one request: the deleted one is moved back without a request and the
+    # live one is crawled.
+    run(env, job(client, entities, env, populate=False, budget=1))
+    assert fake.hits == {"GET /characters/90000059/corporationhistory": 1}
+    assert queue(env.registry) == {("character", 90000001): DEFERRED, ("character", 90000059): IDLE}
+
+    # Once the crawl is empty the deferred entry is requested, history only.
+    run(env, job(client, entities, env, populate=False))
+    assert fake.hits["GET /characters/90000001/corporationhistory"] == 1
+    assert "GET /characters/90000001" not in fake.hits
+    (entry,) = env.registry.refresh_pop(limit=10, now=TODAY_AT + timedelta(days=400))
+    assert entry.entity_id == 90000001 and entry.last_error == "HTTP 404"

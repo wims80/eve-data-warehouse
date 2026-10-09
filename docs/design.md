@@ -555,7 +555,15 @@ the registry's `sweep_state`, so a restart resumes where the slice stopped.
    killmail and has no queue entry, then every other live character and
    corporation by id, highest first.
 6. Drain the queue. Priorities are classes: -1 focus, 0 change, 1 active,
-   3 crawl; 2 is a settled entry, idle until something queues it again.
+   3 crawl, 4 deferred; 2 is a settled entry, idle until something queues
+   it again. A crawl entry whose entity is already marked deleted moves to
+   deferred without a request and is requested once the rest of the crawl
+   is done (decided 2026-10-09): on 2026-10-09 the crawl met a run of
+   deleted killmail characters that mostly answered 404, one slice hit the
+   100-error stop after 1,658 requests and the pace sat at 2 s, about 30
+   requests a minute instead of 270. Nothing is skipped; deleted characters
+   just stop holding up the live ones. A deferred entry, like a crawl
+   entry, fetches history only.
    Within a class kinds take turns, so corporations never wait behind
    characters. A focus, change or active entry fetches details and history
    (an alliance only details); a crawl entry fetches history only, one

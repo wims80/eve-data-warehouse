@@ -288,7 +288,9 @@ characters the warehouse already knows are found as members.
 
 The queue classes are `focus` (asked for with `entities add`), `change` (a
 sweep saw it move), `active` (on recent killmails or in an alliance, details
-older than 30 days), `crawl` (history never fetched) and `idle` (settled). `crawl` shrinking day by day is the
+older than 30 days), `crawl` (history never fetched), `deferred` (crawl entries
+for characters already marked deleted, requested after the rest of the crawl)
+and `idle` (settled). `crawl` shrinking day by day is the
 history filling in; `change` should stay short once the first affiliation
 cycle has caught up with what changed since the last backfill.
 

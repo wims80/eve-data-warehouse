@@ -10,7 +10,7 @@ the registry's sweep state, so a restart resumes where a slice stopped.
 import json
 import logging
 from collections.abc import Callable, Collection, Iterable, Mapping
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import UTC, date, datetime, timedelta
 from typing import Any
 
@@ -76,6 +76,8 @@ SETTLED_FOR = timedelta(days=3650)
 """A refreshed entry is idle until a sweep or a killmail queues it again."""
 NOT_FOUND = frozenset({404, 410})
 FULL_COST: dict[str, int] = {"character": 2, "corporation": 2, "alliance": 1}
+HISTORY_ONLY = frozenset({RefreshClass.CRAWL, RefreshClass.DEFERRED})
+"""Classes that fetch history alone for an entity we already have."""
 """Requests a full refresh sends: the entity plus its history, if it has one."""
 
 
@@ -293,6 +295,7 @@ class SliceReport:
     esi_errors: int = 0
     """Error responses this slice caused: 4xx answers and exhausted retries."""
     splits: int = 0
+    deferred: int = 0
 
 
 @dataclass(slots=True)
@@ -347,7 +350,7 @@ class RefreshJob:
         log.info(
             "refresh slice: %d alliances swept, %d characters checked, %d changes, "
             "%d active and %d crawl queued, %d entities refreshed, %d requests, "
-            "%d ESI errors, %d batch splits",
+            "%d ESI errors, %d batch splits, %d deleted deferred",
             r.alliances_swept,
             r.characters_checked,
             r.changes,
@@ -357,6 +360,7 @@ class RefreshJob:
             self.esi.policy.requests - self._sent_at_start,
             r.esi_errors,
             r.splits,
+            r.deferred,
         )
         return JobOutcome(objects_changed=r.refreshed + r.changes, rows_written=r.rows)
 
@@ -724,17 +728,20 @@ class RefreshJob:
             if not due:
                 return
             crawled = {
-                kind: {
-                    e.entity_id for e in due if e.kind == kind and e.priority == RefreshClass.CRAWL
-                }
+                kind: {e.entity_id for e in due if e.kind == kind and e.priority in HISTORY_ONLY}
                 for kind in ("character", "corporation")
             }
-            known = {kind: set(self._rows_by_id(TABLE[kind], ids)) for kind, ids in crawled.items()}
+            known = {kind: self._rows_by_id(TABLE[kind], ids) for kind, ids in crawled.items()}
             for entry in due:
                 cancel()
-                full = entry.priority != RefreshClass.CRAWL or entry.entity_id not in known.get(
-                    entry.kind, set()
-                )
+                row = known.get(entry.kind, {}).get(entry.entity_id)
+                if entry.priority == RefreshClass.CRAWL and row is not None and row["deleted"]:
+                    # Nothing is skipped: the entry moves behind the crawl and is requested
+                    # there, so live entities do not wait behind a run of 404s.
+                    registry.refresh_update(replace(entry, priority=int(RefreshClass.DEFERRED)))
+                    self._report.deferred += 1
+                    continue
+                full = entry.priority not in HISTORY_ONLY or row is None
                 self._need(FULL_COST[entry.kind] if full else 1)
                 with log_context(kind=entry.kind, entity_id=str(entry.entity_id)):
                     self._refresh_one(registry, entry, full=full)
