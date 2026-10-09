@@ -235,7 +235,11 @@ change counts and the request mix are recorded in design §7.3.
 Accepted 2026-10-09: sweep 2026-10-07 15:20 to 16:30 UTC and cycle 16:31 to
 22:35 UTC unattended (17,969,441 checked, 171,366 changed); spot checks
 against live ESI on 2026-10-07; the crawl's first refreshes at about 02:49
-UTC on 2026-10-09; numbers in design §7.3.
+UTC on 2026-10-09; numbers in design §7.3. Follow-ups the same morning,
+from the live crawl (design §7.3): crawl entries for deleted or never-stored
+entities move to a `deferred` class behind the crawl, still requested; a 404
+or other definitive 4xx sets `last_refreshed_at`, so deleted entities on
+recent killmails are no longer asked again every slice.
 
 ## M7. Gentler EVE Ref traffic
 
