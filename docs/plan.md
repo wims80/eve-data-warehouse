@@ -1,8 +1,8 @@
 # Implementation plan
 
-Status: M0 to M5 complete (2026-10-07). M6 (entity coverage) code done, live
-acceptance in progress. M7 (gentler EVE Ref traffic) and M8 (entity discovery
-and manual add) not started; each starts once the previous one is accepted.
+Status: M0 to M5 complete (2026-10-07), M6 (entity coverage) complete
+(2026-10-09). M7 (gentler EVE Ref traffic) and M8 (entity discovery and
+manual add) not started; each starts once the previous one is accepted.
 
 Milestones are ordered so that each one leaves a working, testable system.
 Do not start a milestone before the previous one's acceptance checks pass.
@@ -231,6 +231,11 @@ corporation that changed alliance is current after the sweep and a character
 who changed corporation is queued as a change; the crawl has refreshed its
 first entities within the budget; `evedw entities status` shows all of it;
 change counts and the request mix are recorded in design §7.3.
+
+Accepted 2026-10-09: sweep 2026-10-07 15:20 to 16:30 UTC and cycle 16:31 to
+22:35 UTC unattended (17,969,441 checked, 171,366 changed); spot checks
+against live ESI on 2026-10-07; the crawl's first refreshes at about 02:49
+UTC on 2026-10-09; numbers in design §7.3.
 
 ## M7. Gentler EVE Ref traffic
 

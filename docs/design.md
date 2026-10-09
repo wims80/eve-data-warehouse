@@ -622,8 +622,22 @@ First live run (M6 acceptance, 2026-10-07 and 08):
   25.2 B, corporations 39.9 B, refresh queue 4.4 B. A full crawl at 3 to 9
   employment records per character adds about 1.3 to 3.8 GB to
   `warehouse.duckdb` (2.4 GB now) and 0.6 to 1.8 GB to the Parquet export.
-- Still to record: the first full UTC day's request mix, and crawl
-  throughput once the change and active queues have drained.
+- Request mix of the first full UTC day at the final settings (2026-10-08,
+  0.05 s floor, 76 slices, about 380,000 requests): the drain about 99%
+  (189,901 entities refreshed in full, two requests each, among them 5,404
+  focused with `entities add`), the daily alliance sweep about 3,650 (one
+  per live alliance; it found 1,126 changes with the recent affiliation
+  pass and closed one alliance), the recent affiliation pass about 50
+  (50,619 characters). ESI error responses: 66 `404` for deleted entities,
+  87 `5xx` attempts (61 of them in the 11:00 downtime, before the downtime
+  pause existed; the rest single 504s, retried), no 420 or 429. EVE Ref
+  answered 38 `429`s across eight syncs, all retried (M7's subject).
+- The change queue (about 171,000 from the cycle) was empty at about 21:20
+  on 2026-10-08 and the active queue at about 02:49 on 2026-10-09. The
+  crawl's first slices refreshed about 4,200 to 5,000 entities per 5,000
+  requests, about 270 a minute, one request each; 404s for characters ESI
+  no longer has ran at 0.4 to 0.9% and each slice tripped one precautionary
+  slowdown at 89 errors left.
 
 Export job (`evedw entities export`): `COPY` each table to
 `lake/entities/<table>.parquet.tmp`, fsync, replace. `evedw views` adds a
