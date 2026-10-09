@@ -325,8 +325,12 @@ run; adding a corporation with `--members` stores members eve-kill lists
 that we did not have; everything works from the CLI with the service running
 and without it.
 
-## M9. Consumers migrate
+## Consumers
 
-Not part of this repository. Valuation, membership reconstruction and reports
-move out of kat into their own applications reading the lake. Kat is retired
-once those run against the warehouse.
+Not a milestone (decided 2026-10-09). Applications that read the warehouse
+live in their own repositories and need nothing from M7 or M8: they read the
+lake and the API, and steer the importer with generic jobs such as
+`entities:add`. They can start whenever the data they need is there; the
+first, a membership-origins report in `../eve-reports`, already runs. Kat's
+valuation, membership and report code was a proof of concept for comparing
+datasets and is not carried over; kat can be retired independently.
