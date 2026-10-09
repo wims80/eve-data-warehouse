@@ -556,21 +556,27 @@ the registry's `sweep_state`, so a restart resumes where the slice stopped.
    corporation by id, highest first.
 6. Drain the queue. Priorities are classes: -1 focus, 0 change, 1 active,
    3 crawl, 4 deferred; 2 is a settled entry, idle until something queues
-   it again. A crawl entry whose entity is already marked deleted moves to
+   it again. A crawl entry whose entity is marked deleted, or is not stored
+   at all (about 64,500 characters seen only on killmails), moves to
    deferred without a request and is requested once the rest of the crawl
-   is done (decided 2026-10-09): on 2026-10-09 the crawl met a run of
-   deleted killmail characters that mostly answered 404, one slice hit the
-   100-error stop after 1,658 requests and the pace sat at 2 s, about 30
-   requests a minute instead of 270. Nothing is skipped; deleted characters
-   just stop holding up the live ones. A deferred entry, like a crawl
-   entry, fetches history only.
+   is done (decided 2026-10-09): on 2026-10-09 the crawl met runs of such
+   characters that mostly answered 404, one slice hit the 100-error stop
+   after 1,658 requests and the pace sat at 1 to 2 s, about 30 requests a
+   minute instead of 270. Nothing is skipped; they just stop holding up
+   the live ones. A deferred entry fetches history only for a stored
+   entity and details and history for one that is not stored. A live
+   character among the unknown ones is found earlier by M8's discovery,
+   which queues it as a change.
    Within a class kinds take turns, so corporations never wait behind
    characters. A focus, change or active entry fetches details and history
    (an alliance only details); a crawl entry fetches history only, one
    request. Success sets
    `last_refreshed_at`, priority 2 and a next-due time ten years out. A
    404/410 marks the stored row deleted with `source = 'esi'`; other 4xx
-   park the entry for a year with the status recorded; transient failures
+   park the entry for a year with the status recorded. Either answer is
+   definitive and sets `last_refreshed_at`; until 2026-10-09 it did not, so
+   step 4 saw every deleted entity on a recent killmail as never refreshed
+   and asked again every slice, 25 to 46 404s a slice; transient failures
    back off by hours, doubling per failure up to a day. A 403 or 420 raises
    out of the job, which records the run as failed; nothing else talks to
    ESI until `evedw esi resume`.

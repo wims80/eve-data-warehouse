@@ -60,8 +60,9 @@ class RefreshClass(IntEnum):
     CRAWL = 3
     """History never fetched from ESI; filled with whatever budget is left."""
     DEFERRED = 4
-    """A crawl entry whose entity is already marked deleted: still requested, after the rest
-    of the crawl, because most of them answer 404 and every 404 slows the pace."""
+    """A crawl entry whose entity is marked deleted or not stored at all (seen only on old
+    killmails): still requested, after the rest of the crawl, because most of them answer
+    404 and every 404 slows the pace."""
 
 
 class Trigger(StrEnum):

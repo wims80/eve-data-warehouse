@@ -735,9 +735,10 @@ class RefreshJob:
             for entry in due:
                 cancel()
                 row = known.get(entry.kind, {}).get(entry.entity_id)
-                if entry.priority == RefreshClass.CRAWL and row is not None and row["deleted"]:
-                    # Nothing is skipped: the entry moves behind the crawl and is requested
-                    # there, so live entities do not wait behind a run of 404s.
+                if entry.priority == RefreshClass.CRAWL and (row is None or row["deleted"]):
+                    # Deleted or never stored: mostly 404s. Nothing is skipped; the entry
+                    # moves behind the crawl and is requested there (in full if not stored),
+                    # so live entities do not wait behind a run of 404s.
                     registry.refresh_update(replace(entry, priority=int(RefreshClass.DEFERRED)))
                     self._report.deferred += 1
                     continue
@@ -762,7 +763,9 @@ class RefreshJob:
                     entity_id=entry.entity_id,
                     priority=int(RefreshClass.IDLE),
                     next_due_at=now + PERMANENT_RETRY,
-                    last_refreshed_at=entry.last_refreshed_at,
+                    # A definitive answer counts as a refresh: without it queue_active sees
+                    # the entity as never refreshed and asks again every slice.
+                    last_refreshed_at=now,
                     failures=entry.failures + 1,
                     last_error=f"HTTP {exc.status}",
                 )

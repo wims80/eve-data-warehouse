@@ -774,7 +774,7 @@ def test_focus_on_a_corporation_queues_its_known_characters_without_requests(
 # --- deleted characters wait behind the crawl ---------------------------------------------
 
 
-def test_deleted_characters_are_crawled_last_and_still_requested(
+def test_deleted_and_unknown_characters_are_crawled_last_and_still_requested(
     env: SyncEnv, entities: EntityStore, esi: tuple[FakeEsi, FakeClock, EsiClient]
 ) -> None:
     fake, _, client = esi
@@ -784,23 +784,53 @@ def test_deleted_characters_are_crawled_last_and_still_requested(
         {"character_id": 90000059},
     )
     fake.put("/characters/90000001/corporationhistory", {"error": "deleted"}, status=404)
+    fake.put("/characters/90000002", {"error": "deleted"}, status=404)  # never stored
     fake.put("/characters/90000059/corporationhistory", [])
     env.registry.refresh_push(
         [
-            RefreshEntry("character", 90000001, priority=CRAWL, next_due_at=TODAY_AT),
-            RefreshEntry("character", 90000059, priority=CRAWL, next_due_at=TODAY_AT),
+            RefreshEntry("character", i, priority=CRAWL, next_due_at=TODAY_AT)
+            for i in (90000001, 90000002, 90000059)
         ]
     )
 
-    # With room for one request: the deleted one is moved back without a request and the
-    # live one is crawled.
+    # With room for one request: the deleted and the unknown one move back without a
+    # request and the live one is crawled.
     run(env, job(client, entities, env, populate=False, budget=1))
     assert fake.hits == {"GET /characters/90000059/corporationhistory": 1}
-    assert queue(env.registry) == {("character", 90000001): DEFERRED, ("character", 90000059): IDLE}
+    assert queue(env.registry) == {
+        ("character", 90000001): DEFERRED,
+        ("character", 90000002): DEFERRED,
+        ("character", 90000059): IDLE,
+    }
 
-    # Once the crawl is empty the deferred entry is requested, history only.
+    # Once the crawl is empty the deferred entries are requested: history only for the
+    # stored one, in full (details first) for the unknown one.
     run(env, job(client, entities, env, populate=False))
     assert fake.hits["GET /characters/90000001/corporationhistory"] == 1
     assert "GET /characters/90000001" not in fake.hits
-    (entry,) = env.registry.refresh_pop(limit=10, now=TODAY_AT + timedelta(days=400))
-    assert entry.entity_id == 90000001 and entry.last_error == "HTTP 404"
+    assert fake.hits["GET /characters/90000002"] == 1
+    parked = env.registry.refresh_pop(limit=10, now=TODAY_AT + timedelta(days=400))
+    assert {(e.entity_id, e.last_error) for e in parked} == {
+        (90000001, "HTTP 404"),
+        (90000002, "HTTP 404"),
+    }
+
+
+def test_a_deleted_entity_on_a_recent_killmail_is_not_asked_again_every_slice(
+    env: SyncEnv, entities: EntityStore, esi: tuple[FakeEsi, FakeClock, EsiClient]
+) -> None:
+    fake, _, client = esi
+    fake.put("/characters/90000001", {"error": "deleted"}, status=404)
+    recent = {"character": {90000001}}
+    refresh = job(client, entities, env, populate=False)
+    refresh.queue_active(env.registry, recent)
+    run(env, refresh)
+    assert fake.hits == {"GET /characters/90000001": 1}
+
+    # The next slice sees the same killmail: the 404 counts as a refresh, so the parked
+    # entry is not queued as active and asked again.
+    refresh = job(client, entities, env, populate=False)
+    refresh.queue_active(env.registry, recent)
+    assert env.registry.refresh_pop(limit=10, now=TODAY_AT) == []
+    run(env, refresh)
+    assert fake.hits == {"GET /characters/90000001": 1}
