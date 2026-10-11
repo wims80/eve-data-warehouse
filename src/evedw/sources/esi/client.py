@@ -11,6 +11,7 @@ import json
 import logging
 import os
 import random
+import threading
 import time
 from collections.abc import Callable, Collection, Mapping
 from dataclasses import dataclass
@@ -33,6 +34,10 @@ from evedw.sources.everef import user_agent
 from evedw.store.base import CachedResponse, ResponseCache
 
 log = logging.getLogger(__name__)
+
+IN_FLIGHT = threading.Lock()
+"""Held while an ESI request is out, for every client in the process: one request in flight
+(design §11) even if two jobs ever held a client at once."""
 
 RETRY_STATUS = frozenset({408, 429})
 STOP_STATUS = frozenset({403, 420})
@@ -332,12 +337,13 @@ class EsiClient:
             policy.charge(self._today())
             self._save_policy()
             try:
-                response = self._client.request(
-                    method,
-                    url,
-                    headers=headers,
-                    content=body.encode("utf-8") if body is not None else None,
-                )
+                with IN_FLIGHT:
+                    response = self._client.request(
+                        method,
+                        url,
+                        headers=headers,
+                        content=body.encode("utf-8") if body is not None else None,
+                    )
             except httpx.TransportError as exc:
                 last_error = f"{type(exc).__name__}: {exc}"
                 if policy.outage_expected(self._clock()):

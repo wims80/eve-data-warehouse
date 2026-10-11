@@ -22,10 +22,9 @@ def health(request: Request) -> HealthOut:
         recent = state.registry.runs(limit=1, job=job)
         if recent:
             last_runs[job] = RunOut.from_domain(recent[0])
-    current = state.worker.current
-    if current is not None:
-        # The worker holds the run as queued; the registry has the live status.
-        current = state.registry.get_run(current.run_id) or current
+    # The worker holds runs as queued; the registry has their live status.
+    currents = [state.registry.get_run(r.run_id) or r for r in state.worker.currents]
+    current = currents[0] if currents else None
     return HealthOut(
         ok=state.lock.held and free_gb >= settings.min_free_gb,
         version=__version__,
@@ -35,6 +34,7 @@ def health(request: Request) -> HealthOut:
         free_gb=round(free_gb, 2),
         min_free_gb=settings.min_free_gb,
         current_run=RunOut.from_domain(current) if current else None,
+        current_runs=[RunOut.from_domain(r) for r in currents],
         queued=[RunOut.from_domain(r) for r in state.worker.queued],
         schedule=[
             ScheduleOut(

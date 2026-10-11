@@ -169,7 +169,8 @@ curl -s localhost:8470/runs/<run_id>
 ```
 
 `evedw sync market_history --from 2026-10-01 --force` does the same and waits
-for the run when the service is up. Runs execute one at a time; `GET /health`
+for the run when the service is up. Runs execute one at a time per lane (ESI
+work and archive work, design §8); `GET /health`
 shows the current one, the queue and when each scheduled job is next due.
 
 An application can steer the importer the same way, for instance to have an

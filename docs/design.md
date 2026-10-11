@@ -234,7 +234,7 @@ src/evedw/
   service/
     app.py             FastAPI factory and lifespan
     state.py           what the service owns; routes reach it through the request
-    worker.py          single job worker: queued runs, one at a time, cancel on stop
+    worker.py          job worker: an esi and an archive lane, one run at a time each, cancel on stop
     models.py          response bodies, shared with the client
     client.py          HTTP client the CLI uses when a service holds the lock
     routes/            health, datasets, jobs, runs, lake, query
@@ -784,9 +784,17 @@ view per exported file.
 | `verify` | weekly | read-only consistency report |
 
 The scheduler is a small asyncio loop owned by the service: each entry has a
-job name, parameters, an interval and a next-due time. Entries never overlap
-because every run, scheduled or triggered, goes through the service's single
-job worker, which executes one run at a time in a thread. An entry's next due
+job name, parameters, an interval and a next-due time. Every run, scheduled
+or triggered, goes through the service's job worker, which has two lanes
+(decided 2026-10-11), each executing one run at a time in a thread: the
+`esi` lane runs every job that sends ESI requests (`entities:refresh`,
+`entities:add`) and the `archive` lane everything else (syncs,
+`killmails:merge`, `entities:seed`, `entities:export`, `verify`). A long
+archive job, such as a zKillboard history slice or a weekly sweep, no longer
+holds up the entity refresh, and ESI still sees one job and one request at a
+time. The scheduler starts each due entry on its own and never starts an
+entry again while its run is in progress. Within a lane, a scheduled refresh
+slice yields to any other queued run. An entry's next due
 time is computed when its run finishes, so the cadence is measured from the
 end of the previous run and a slow run never queues itself twice. A failed
 run reschedules at the normal interval with the error in the run log. At
@@ -913,7 +921,9 @@ Binding for every ESI request made by this project, including ad hoc scripts.
 
 - One request in flight, five attempts for transient failures (transport
   errors, 408, 429, 5xx) with exponential backoff and jitter. Every request
-  goes through `EsiClient._request`.
+  goes through `EsiClient._request`. A process-wide lock is held while a
+  request is out, so one request in flight holds across every client in the
+  process; all ESI jobs also share the worker's `esi` lane (section 8).
 - The pace adapts (decided 2026-10-07). CCP publishes no request-rate cap
   for the routes we use (none sends `X-RateLimit-Group`); what gets an
   application banned is ignoring the error limit or getting around the cache

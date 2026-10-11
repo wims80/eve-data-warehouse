@@ -114,6 +114,8 @@ class Scheduler:
         self._submit = submit
         self._now = now
         self._max_sleep = max_sleep
+        self._running: dict[str, asyncio.Task[None]] = {}
+        """Entries whose run is in progress, by label: never started twice at once."""
 
     def seed(self, registry: Registry) -> None:
         """Set every entry's next-due time from its last run in the registry."""
@@ -132,29 +134,46 @@ class Scheduler:
 
     def due(self, now: datetime | None = None) -> list[ScheduledJob]:
         now = now or self._now()
-        return sorted((j for j in self.jobs if j.next_due <= now), key=lambda j: j.next_due)
+        return sorted(
+            (j for j in self.jobs if j.next_due <= now and j.label not in self._running),
+            key=lambda j: j.next_due,
+        )
 
     def next_due(self) -> datetime | None:
         return min((j.next_due for j in self.jobs), default=None)
 
+    def start_due(self) -> list[asyncio.Task[None]]:
+        """Start every due entry that is not already running, in due order, without waiting
+        for any of them: the worker's lanes decide what runs at once (design §8)."""
+        started: list[asyncio.Task[None]] = []
+        for job in self.due():
+            task = asyncio.create_task(self._run(job), name=f"evedw-scheduled-{job.label}")
+            self._running[job.label] = task
+            started.append(task)
+        return started
+
+    async def _run(self, job: ScheduledJob) -> None:
+        # Reschedule before running so a crash in submit cannot spin the loop.
+        job.next_due = self._now() + job.interval
+        try:
+            job.last_run = await self._submit(job)
+        except Exception:
+            log.exception("scheduled %s could not be submitted", job.label)
+        finally:
+            # The interval counts from the end of the run.
+            job.next_due = self._now() + job.interval
+            self._running.pop(job.label, None)
+
     async def run_pending(self) -> int:
-        """Run every entry that is due, one after another. Returns how many ran."""
-        ran = 0
-        while due := self.due():
-            job = due[0]
-            # Reschedule before running so a crash in submit cannot spin the loop.
-            job.next_due = self._now() + job.interval
-            try:
-                job.last_run = await self._submit(job)
-            except Exception:
-                log.exception("scheduled %s could not be submitted", job.label)
-            job.next_due = self._now() + job.interval
-            ran += 1
-        return ran
+        """Start every due entry and wait for those runs. Returns how many ran."""
+        started = self.start_due()
+        if started:
+            await asyncio.gather(*started)
+        return len(started)
 
     async def run_forever(self) -> None:
         while True:
-            await self.run_pending()
+            self.start_due()
             wait = self._max_sleep
             upcoming = self.next_due()
             if upcoming is not None:

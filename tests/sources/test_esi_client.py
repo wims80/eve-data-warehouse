@@ -396,3 +396,51 @@ def test_without_a_restart_a_healthy_status_resumes_after_the_deadline(
         client.get("/alliances/1", store=False)
     clock.now = ELEVEN + 30 * 60
     assert client.get("/alliances/1", store=False).body == {"name": "A"}
+
+
+def test_esi_requests_are_never_in_flight_at_once_across_clients(
+    cache: MemoryCache, policy_path: Path, tmp_path: Path
+) -> None:
+    import threading
+    import time
+
+    active = 0
+    peak = 0
+    guard = threading.Lock()
+
+    def slow(request: httpx.Request) -> httpx.Response:
+        nonlocal active, peak
+        with guard:
+            active += 1
+            peak = max(peak, active)
+        time.sleep(0.02)
+        with guard:
+            active -= 1
+        return httpx.Response(200, json={"name": "A"}, headers={"Cache-Control": "max-age=60"})
+
+    transport = httpx.MockTransport(slow)
+    clients = [
+        EsiClient(
+            ESI_URL,
+            compatibility_date="2026-08-18",
+            contact="tests@example.test",
+            cache=MemoryCache(),
+            policy_path=tmp_path / f"policy-{n}.json",
+            daily_budget=1000,
+            spacing=0.0,
+            client=httpx.Client(transport=transport),
+            sleep=lambda _: None,
+        )
+        for n in range(2)
+    ]
+
+    def fetch(client: EsiClient) -> None:
+        for i in range(5):
+            client.get(f"/alliances/{i}", store=False)
+
+    threads = [threading.Thread(target=fetch, args=(c,)) for c in clients]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+    assert peak == 1

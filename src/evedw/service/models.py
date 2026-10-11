@@ -236,6 +236,9 @@ class HealthOut(BaseModel):
     free_gb: float
     min_free_gb: float
     current_run: RunOut | None
+    """The archive lane's run if one is running, else the ESI lane's."""
+    current_runs: list[RunOut] = []
+    """Every lane's running job (design §8)."""
     queued: list[RunOut]
     schedule: list[ScheduleOut]
     last_runs: dict[str, RunOut]
