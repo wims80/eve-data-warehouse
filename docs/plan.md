@@ -1,8 +1,8 @@
 # Implementation plan
 
 Status: M0 to M5 complete (2026-10-07), M6 (entity coverage) complete
-(2026-10-09). M7 (gentler EVE Ref traffic) code done, live acceptance in
-progress. M8 (entity discovery and manual add) starts once M7 is accepted.
+(2026-10-09), M7 (gentler EVE Ref traffic) complete (2026-10-11). M8 (entity
+discovery and manual add) is next.
 
 Milestones are ordered so that each one leaves a working, testable system.
 Do not start a milestone before the previous one's acceptance checks pass.
@@ -243,7 +243,7 @@ recent killmails are no longer asked again every slice.
 
 ## M7. Gentler EVE Ref traffic
 
-Code done 2026-10-09; live acceptance in progress.
+Complete (2026-10-11).
 
 EVE Ref's download guide asks clients to use `etag`, `last-modified` and
 `content-length` to avoid downloading the same data twice, and uses two
@@ -272,6 +272,11 @@ Acceptance: a sync with nothing changed upstream downloads no index body
 that was unchanged since the previous sync and sends at most about 30 HEADs
 per dataset; a full day of scheduled syncs shows the reduced request count
 in the log; no 429 from EVE Ref.
+
+Accepted 2026-10-11: 12 scheduled syncs from 2026-10-09 22:12 to 2026-10-11
+05:00 UTC drew no 429 (before M7 every scheduled sync drew 4 to 5); listings
+answered 304 except the current year and the totals; 28 to 36 HEADs a sync,
+more only when a year's listing changed. Numbers in design §6.
 
 ## M8. Entity discovery and manual add
 

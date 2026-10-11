@@ -382,7 +382,14 @@ discover   fetch per-year index.json for the object listing, then HEAD a
            before, about 30 such killmail days were HEADed on every sync.
            A listing that answers 404 drops its cached body. Each
            sync logs `EVE Ref traffic: N listing requests (M answered 304),
-           H HEADs, D downloads`.
+           H HEADs, D downloads`. Measured over 12 scheduled syncs,
+           2026-10-09 22:12 to 2026-10-11 05:00 UTC: killmails 20 or 21 of
+           21 listings answered 304, market history 22 or 23 of 25 (the
+           current year and the totals change with every new day), 28 to
+           36 HEADs a sync, 60 to 81 when EVE Ref republished a batch of
+           days and a year's listing changed, and no 429; before, every
+           scheduled sync downloaded all 46 listings, sent several hundred
+           HEADs and drew 4 to 5 429s.
 fetch      skip an object whose live revision already has its etag under
            the current parser_version (an identical rewrite upstream only
            moves Last-Modified); mark it `imported` again, unless forced.
