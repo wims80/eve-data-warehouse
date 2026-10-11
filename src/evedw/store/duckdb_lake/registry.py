@@ -492,6 +492,21 @@ class DuckDBRegistry:
                 [_to_db(now), status.value, objects_changed, rows_written, error, run_id],
             )
 
+    def cancel_unfinished_runs(self, *, now: datetime, error: str) -> int:
+        with self._lock:
+            row = self._con.execute(
+                "UPDATE import_run SET finished_at = ?, status = ?, error = ? "
+                "WHERE status IN (?, ?) RETURNING run_id",
+                [
+                    _to_db(now),
+                    RunStatus.CANCELLED.value,
+                    error,
+                    RunStatus.QUEUED.value,
+                    RunStatus.RUNNING.value,
+                ],
+            ).fetchall()
+        return len(row)
+
     def get_run(self, run_id: RunId) -> ImportRun | None:
         with self._lock:
             row = self._con.execute(

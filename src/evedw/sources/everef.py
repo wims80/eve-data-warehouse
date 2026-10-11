@@ -394,7 +394,11 @@ class EveRefClient:
         return found
 
     def refresh_headers(
-        self, objects: Iterable[DiscoveredObject], *, workers: int = CONCURRENCY
+        self,
+        objects: Iterable[DiscoveredObject],
+        *,
+        workers: int = CONCURRENCY,
+        cancel: Callable[[], None] = lambda: None,
     ) -> list[DiscoveredObject]:
         """Replace etag, size and last_modified with what a HEAD of each file reports now.
 
@@ -407,6 +411,8 @@ class EveRefClient:
             return []
 
         def refresh(obj: DiscoveredObject) -> DiscoveredObject:
+            # A sweep is thousands of HEADs; a stop must not wait for all of them.
+            cancel()
             try:
                 response = self._request("HEAD", obj.url, count="heads")
             except DownloadError as exc:

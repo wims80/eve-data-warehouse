@@ -2,6 +2,8 @@
 ``market_history/date=<date>`` partition."""
 
 import logging
+from collections.abc import Collection
+from datetime import date
 from pathlib import Path
 
 import duckdb
@@ -83,6 +85,9 @@ class MarketHistoryImporter:
     @property
     def dataset(self) -> Dataset:
         return MARKET_HISTORY
+
+    def finish(self, ctx: RunContext, days: Collection[date]) -> None:
+        """Nothing to do after the run."""
 
     def import_revision(
         self,

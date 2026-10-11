@@ -2,8 +2,11 @@
 
 from datetime import date, timedelta
 
+import pytest
+
 from evedw.domain.datasets import MARKET_HISTORY
 from evedw.domain.registry import RunStatus
+from evedw.jobs.runner import JobCancelled
 from tests.helpers import TODAY, SyncEnv, market_csv_bz2
 
 
@@ -118,3 +121,20 @@ def test_pending_old_day_gets_its_headers_checked_before_download(env: SyncEnv) 
     run = env.sync()
     assert run.status is RunStatus.SUCCEEDED and run.objects_changed == 1
     assert env.lake.read("market_history", date_from=old_day, date_to=old_day).num_rows == 150
+
+
+def test_a_stop_during_header_refresh_sends_no_further_heads(env: SyncEnv) -> None:
+    for offset in range(10):
+        day = TODAY - timedelta(days=offset)
+        env.fake.put(day, market_csv_bz2(day, rows=5), expected=5)
+    asked: list[int] = []
+
+    def cancel() -> None:
+        asked.append(1)
+        if len(asked) > 3:
+            raise JobCancelled("stop requested")
+
+    found = env.client.discover(MARKET_HISTORY, [TODAY.year])
+    with pytest.raises(JobCancelled):
+        env.client.refresh_headers(found, workers=1, cancel=cancel)
+    assert env.fake.requests("HEAD") == 3

@@ -46,6 +46,14 @@ Check the current endpoint specification at
 https://developers.eveonline.com/api-explorer before adding an endpoint, and
 keep the compatibility date pinned in `config.py`.
 
+## zKillboard
+
+Design §11a is binding for every request to zKillboard, including one-off
+scripts: a descriptive User-Agent with the project URL, compression, one
+request in flight at the configured spacing, conditional requests for the
+history listings, no retry on 403 or 429. Check
+https://zkillboard.com/api/docs/ before changing the client.
+
 ## Tests
 
 - `uv run pytest` must pass with no network. HTTP is mocked with `respx`.

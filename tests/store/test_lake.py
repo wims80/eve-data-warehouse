@@ -109,3 +109,28 @@ def test_view_sql_covers_populated_tables_only(lake: ParquetLake) -> None:
     con = duckdb.connect()
     con.execute(sql)
     assert con.execute("SELECT count(*) FROM market_history").fetchone() == (1,)
+
+
+def test_layout_1_moves_killmail_tables_under_sources_everef(tmp_path: Path) -> None:
+    root = tmp_path / "lake"
+    for table in ("killmails", "attackers", "items", "market_history"):
+        (root / table / "source_date=2026-10-01").mkdir(parents=True)
+        (root / table / "source_date=2026-10-01" / "data.parquet").write_bytes(b"x")
+    lake = ParquetLake(root)
+    assert lake.layout_version() == 1
+
+    done = lake.migrate_layout()
+    assert done[-1] == "lake layout version 2" and len(done) == 4
+    for table in ("killmails", "attackers", "items"):
+        assert (root / "sources" / "everef" / table / "source_date=2026-10-01").is_dir()
+        assert not (root / table).exists()
+    assert (root / "market_history").is_dir()  # not a killmail table: stays
+    assert lake.layout_version() == 2
+    assert lake.migrate_layout() == []  # idempotent
+
+
+def test_a_new_lake_is_current_and_gets_its_marker(tmp_path: Path) -> None:
+    lake = ParquetLake(tmp_path / "lake")
+    assert lake.layout_version() == 2
+    assert lake.migrate_layout() == ["lake layout version 2"]
+    assert (tmp_path / "lake" / "LAYOUT").read_text().strip() == "2"

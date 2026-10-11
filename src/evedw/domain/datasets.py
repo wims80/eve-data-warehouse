@@ -30,6 +30,10 @@ class Dataset:
     unsupported: tuple[tuple[str, str], ...] = ()
     """``(object file name, reason)`` of upstream objects this dataset cannot import.
     Sync marks them ``skipped`` instead of fetching them."""
+    date_format: str = "%Y-%m-%d"
+    """``strptime`` format of the date captured from an object's file name."""
+    source: str = "everef"
+    """Upstream the dataset comes from: ``everef`` or ``zkillboard``."""
 
     def unsupported_reason(self, object_key: str) -> str | None:
         name = object_key.rpartition("/")[2]
@@ -57,7 +61,7 @@ class Dataset:
         match = self.object_name_pattern.match(name)
         if match is None:
             return None
-        return datetime.strptime(match.group("date"), "%Y-%m-%d").date()  # noqa: DTZ007
+        return datetime.strptime(match.group("date"), self.date_format).date()  # noqa: DTZ007
 
     def object_key(self, year: int, name: str) -> str:
         return f"{year}/{name}"
@@ -108,7 +112,26 @@ ENTITIES_BACKFILL = Dataset(
     ),
 )
 
-DATASETS: dict[str, Dataset] = {d.name: d for d in (KILLMAILS, MARKET_HISTORY, ENTITIES_BACKFILL)}
+ZKILLBOARD_KILLMAILS = Dataset(
+    name="zkillboard_killmails",
+    parser_version=1,
+    first_date=date(2007, 12, 5),
+    index_path=None,
+    totals_path="history/totals.json",
+    totals_key_format="%Y%m%d",
+    object_name_pattern=re.compile(r"^(?P<date>\d{8})\.json$"),
+    date_format="%Y%m%d",
+    source="zkillboard",
+)
+"""zKillboard's R2Z2 daily history (design §2.4): one ``history/raw/YYYYMMDD.json`` per UTC
+day, discovered from ``history/totals.json``."""
+
+DATASETS: dict[str, Dataset] = {
+    d.name: d for d in (KILLMAILS, MARKET_HISTORY, ENTITIES_BACKFILL, ZKILLBOARD_KILLMAILS)
+}
+
+SYNC_DATASETS: tuple[str, ...] = ("killmails", "market_history", "zkillboard_killmails")
+"""Datasets synced by ``sync:<name>``; the entity backfill is imported by ``entities:seed``."""
 
 
 def get_dataset(name: str) -> Dataset:

@@ -143,6 +143,11 @@ class Registry(Protocol):
 
     def runs(self, *, limit: int = 20, job: str | None = None) -> list[ImportRun]: ...
 
+    def cancel_unfinished_runs(self, *, now: datetime, error: str) -> int:
+        """Record every queued or running run as cancelled with ``error``; returns how many.
+        Called when the writer lock is newly held: no such run can still be alive."""
+        ...
+
     # -- entity refresh queue ------------------------------------------------------------
 
     def refresh_push(self, entries: Iterable[RefreshEntry]) -> None:
@@ -202,6 +207,10 @@ class Lake(Protocol):
 
     def partitions(self, table: str) -> list[PartitionInfo]: ...
 
+    def partition(self, table: str, partition: str) -> PartitionInfo | None:
+        """One partition with its metadata, or ``None`` when it is not on disk."""
+        ...
+
     def read(
         self,
         table: str,
@@ -213,6 +222,20 @@ class Lake(Protocol):
 
     def view_sql(self) -> str:
         """DDL a consumer can run in its own DuckDB to get views over the lake."""
+        ...
+
+    def killmail_day_counts(self, table: str) -> pa.Table:
+        """For a killmail table (merged or per source): ``day`` (UTC day of
+        ``killmail_time``), ``killmails`` (rows) and ``distinct_ids``, one row per day."""
+        ...
+
+    def layout_version(self) -> int:
+        """The lake's directory layout version; ``LAYOUT_VERSION`` is current (design §4)."""
+        ...
+
+    def migrate_layout(self) -> list[str]:
+        """Bring the layout to the current version; returns what was done, empty when it
+        already was current. Needs the writer lock: nothing may write the lake meanwhile."""
         ...
 
 

@@ -20,6 +20,7 @@ def test_normalise_params_fills_defaults_and_parses() -> None:
         "force": False,
         "sweep": False,
         "offline": False,
+        "max_objects": None,
     }
     parsed = normalise_params(
         "sync:market_history", {"from": "2026-10-01", "to": date(2026, 10, 2)}
@@ -93,6 +94,7 @@ def test_catalog_runs_sync_and_export(env: SyncEnv) -> None:
             "force": False,
             "sweep": False,
             "offline": False,
+            "max_objects": None,
         }
         assert not env.partition(D1).exists() and env.partition(D3).exists()
 

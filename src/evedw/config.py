@@ -44,6 +44,14 @@ class Settings(BaseSettings):
     everef_base_url: str = "https://data.everef.net"
     everef_spacing: float = 0.5
     """Least seconds between EVE Ref request starts (design §6)."""
+    zkillboard_base_url: str = "https://r2z2.zkillboard.com"
+    zkillboard_spacing: float = 0.2
+    """Least seconds between zKillboard request starts (design §11a)."""
+    zkillboard_download_spacing: float = 1.0
+    """Least seconds between zKillboard daily history downloads (design §11a)."""
+    zkillboard_sync_max: int = 1000
+    """Days one scheduled zKillboard sync imports at most, newest first (design §7.1)."""
+    sync_interval_zkillboard: timedelta = Field(default=timedelta(hours=1))
     esi_base_url: str = "https://esi.evetech.net"
 
     sync_interval_killmails: timedelta = Field(default=timedelta(hours=6))
@@ -87,6 +95,7 @@ class Settings(BaseSettings):
     @field_validator(
         "sync_interval_killmails",
         "sync_interval_market",
+        "sync_interval_zkillboard",
         "sweep_interval",
         "refresh_interval",
         "export_interval",
@@ -146,6 +155,11 @@ class Settings(BaseSettings):
     @property
     def esi_policy_path(self) -> Path:
         return self.esi_dir / "policy.json"
+
+    @property
+    def zkillboard_policy_path(self) -> Path:
+        """zKillboard refusals and stop flag (design §11a)."""
+        return self.data_dir / "zkillboard" / "policy.json"
 
     @property
     def entities_dir(self) -> Path:

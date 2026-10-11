@@ -29,8 +29,9 @@ warehouse:
 
 - ISK valuation of killmails, blueprint and manufacturing cost fallbacks.
 - Membership reconstruction, throw weight, fight reconstruction, dashboards.
-- EveWho, DOTLAN and zKillboard scraping. A zKillboard metadata dataset can be
-  added later as a fourth dataset if its flags are wanted.
+- EveWho, DOTLAN and zKillboard scraping. zKillboard's documented R2Z2 API is
+  a source (decided 2026-10-11, section 2.4); scraping its web pages or
+  querying its per-killmail API in bulk is not.
 - Disk budgeting beyond a free-space floor. Nothing is deleted automatically.
 - Authenticated ESI (EVE SSO login), and with it full corporation member
   lists. Only public endpoints are used (decided 2026-10-07).
@@ -143,6 +144,30 @@ Facts below were measured on 2026-10-05 against live EVE Ref data.
   these routes sends rate-limit bucket headers, so only the error limit and
   our own pacing (at most 86,400 requests a day) bound them.
 
+### 2.4 zKillboard R2Z2 killmails
+
+zKillboard publishes every killmail it learns of through R2Z2, a documented
+API (`https://r2z2.zkillboard.com`, replacing RedisQ since 2026-05-31,
+checked 2026-10-11):
+
+- `/history/totals.json`: killmails per UTC day, keyed `YYYYMMDD`, every day
+  since 2007-12-05.
+- `/history/raw/{YYYYMMDD}.json`: every killmail of that day as one JSON
+  object mapping killmail id to the ESI killmail, without hashes or zKillboard
+  metadata; about 37 MB for a recent day. ETag and Last-Modified are served.
+- `/history/{YYYYMMDD}.json`: the compact index of that day, killmail id to
+  hash.
+- `/ephemeral/sequence.json` and `/ephemeral/{sequence}.json`: the live feed
+  (M9), each object an ESI killmail with its hash and a `zkb` block.
+
+Compared with EVE Ref (2026-10-11, 6,881 days to 2026-10-06): 95,624,822
+killmails against 95,628,630, 6,431 days equal. zKillboard has more on 446
+days, mostly recent ones that EVE Ref has not republished yet, and has
+2026-07-13, which EVE Ref lacks entirely (15,746 killmails). EVE Ref has more
+on 4 days; zKillboard's history lacks most of 2023-05-06 (1 against 17,240)
+and part of 2023-05-08. Neither source is complete alone, so the warehouse
+keeps both and merges them (section 7.1).
+
 ## 3. Architecture
 
 Three layers, dependencies point downward only.
@@ -231,10 +256,15 @@ data/
     killmails/2026/killmails-2026-10-01/<sha256>.tar.bz2
     market_history/2026/market-history-2026-10-01/<sha256>.csv.bz2
     entities_backfill/<year>/<name>/<sha256>.tar.bz2
+    zkillboard_killmails/2026/20261001/<sha256>.json.gz, <sha256>.index.json.gz
+  zkillboard/policy.json           zKillboard refusals and stop flag (section 11)
   lake/
-    killmails/source_date=2026-10-01/data.parquet
+    killmails/source_date=2026-10-01/data.parquet      merged: one row per killmail
     attackers/source_date=2026-10-01/data.parquet
     items/source_date=2026-10-01/data.parquet
+    sources/everef/{killmails,attackers,items}/source_date=2026-10-01/data.parquet
+    sources/zkillboard/{killmails,attackers,items}/source_date=2026-10-01/data.parquet
+    LAYOUT                                             lake layout version (2)
     market_history/date=2026-10-01/data.parquet
     entities/characters.parquet, corporations.parquet, alliances.parquet,
              character_employment.parquet, corporation_alliance_history.parquet
@@ -257,7 +287,13 @@ data/
   writer or many readers on a file, not both, so consumers must never open
   it. Entity tables are exported to Parquet for them.
 - Parquet files carry key-value metadata: `dataset`, `object_key`,
-  `revision`, `source_sha256`, `parser_version`, `written_at`.
+  `revision`, `source_sha256`, `parser_version`, `written_at`. A merged
+  partition carries instead the source partitions it was built from, with
+  their revisions, under `evedw.built_from`.
+- Layout version 2 (2026-10-11) moved the EVE Ref killmail partitions from
+  `lake/{killmails,attackers,items}` to `lake/sources/everef/`; `evedw
+  migrate` does the move with directory renames and writes `lake/LAYOUT`,
+  and the service refuses to start on an older layout.
 
 Sizes measured 2026-10-05 after the full backfill (killmails 2007-12-05 to
 2026-10-03, 6,877 days; market history 2003-10-01 to 2026-10-04, 8,403 days),
@@ -390,6 +426,14 @@ discover   fetch per-year index.json for the object listing, then HEAD a
            days and a year's listing changed, and no 429; before, every
            scheduled sync downloaded all 46 listings, sent several hundred
            HEADs and drew 4 to 5 429s.
+           A file rewritten upstream between its HEAD and its download no
+           longer matches the etag the HEAD recorded: the download is
+           refused, the object goes back to `changed` with the reason in
+           `last_error`, and the run carries on without counting it as a
+           failure (decided 2026-10-11; zKillboard rewrites about 1 in 250
+           history days during a long backfill run). An object with a
+           `last_error` always gets fresh headers on the next sync, so it is
+           fetched with its new etag then.
 fetch      skip an object whose live revision already has its etag under
            the current parser_version (an identical rewrite upstream only
            moves Last-Modified); mark it `imported` again, unless forced.
@@ -481,9 +525,46 @@ to an old attackers partition for that day. Consumers that join tables and
 need a consistent day should filter by the registry's current revision
 through the partition metadata, or read through the service.
 
+Two layers (decided 2026-10-11). The per-source layer holds what each
+source's files say: `sources/everef/{killmails,attackers,items}` from EVE
+Ref's archives (dataset `killmails`) and `sources/zkillboard/...` from
+zKillboard's daily history (dataset `zkillboard_killmails`), one partition
+per upstream file, `source_date` the file's day. Consumers never read it; it
+exists so every merged row traces to a source revision and the merged layer
+can be rebuilt from it.
+
+The merged layer is what consumers read: `killmails`, `attackers`, `items`,
+one partition per UTC day of `killmail_time`, `source_date` that day, one row
+per `killmail_id`. `killmails` adds `sources`, the list of sources that have
+the killmail (`everef`, `zkillboard`, later `live`). Both sources carry the
+same immutable ESI killmail, so where both have one EVE Ref's rows are kept,
+its hash and `http_last_modified` included; zKillboard's raw history has no
+hashes, so its killmails take theirs from the day's compact index. A merged
+day is built from the source partitions of that day and the days either side,
+because upstream files spill over: EVE Ref's 2026-01-06 file also carries
+14,042 killmails of 2026-01-05, which is how 14,043 ids came to sit in two
+day partitions before the merge. Each sync merges the days it imported, and
+`evedw killmails merge [--from --to]` (job `killmails:merge`) rebuilds any
+range; a merged partition is written through `data.parquet.tmp` and
+`os.replace` like every other, and its metadata names the source partitions
+and revisions it was built from.
+
 Consumer views, generated by the backend and printable with `evedw views`:
-`killmails`, `attackers`, `items` over the partition globs, and
-`killmails_unique` which keeps the newest `source_date` per `killmail_id`.
+`killmails`, `attackers`, `items` over the merged layer. `killmails_unique`
+is gone: the merged layer already has one row per killmail.
+
+zKillboard's day file is one JSON object, not NDJSON; its reader writes one
+line per killmail, with `killmail_hash` from the index, and the same
+normaliser runs on it. The raw day file and its index are stored
+gzip-compressed (`<sha256>.json.gz`, `<sha256>.index.json.gz`), the sha256
+being that of the day file as served. Discovery reads `totals.json` with a
+conditional GET; a day whose count did not change since the last body keeps
+the file metadata in the registry, and only new days, days whose count
+changed, the last `EVEDW_HEAD_DAYS` days and every day on the weekly sweep
+get a HEAD. The first import of the whole history runs in scheduled slices
+of `EVEDW_ZKILLBOARD_SYNC_MAX` days (default 1,000) an hour, newest first,
+so it never holds the worker for half a day: about seven runs for the whole
+history.
 
 ### 7.2 Market history
 
@@ -755,8 +836,13 @@ an upper bound on the time left, and queue growth per class. It sends no ESI
 requests; `--watch` repeats until Ctrl-C.
 
 On shutdown the service sets a cancel flag that jobs check between objects
-(sync) or entities (refresh), waits for the current run to notice it, records
-it `cancelled`, and marks queued runs cancelled without starting them.
+(sync), before every HEAD of a header refresh, between entities (refresh) and
+between merged days, waits for the current run to notice it, records it
+`cancelled`, and marks queued runs cancelled without starting them. A run a
+killed process left `queued` or `running` is recorded `cancelled` when the
+service next starts, since the writer lock proves nothing else runs it
+(2026-10-11: a sweep-length HEAD phase that did not check the flag outlived
+systemd's 120 s stop grace and was killed).
 
 Every job accepts a date range and a `--force` flag that treats objects in
 range as `changed`. That is the manual backfill path. `sync --offline` sends
@@ -921,6 +1007,37 @@ Binding for every ESI request made by this project, including ad hoc scripts.
 - Tests mock ESI (`tests/fake_esi.py`). Live calls happen only in explicitly
   marked manual tests or operator-run commands.
 
+### 11a. zKillboard policy
+
+Binding for every request to zKillboard by this project, including one-off
+scripts, as section 11 is for ESI. It follows zKillboard's API documentation
+(https://zkillboard.com/api/docs/, checked 2026-10-11), which is checked
+again before the client changes:
+
+- "Send a descriptive `User-Agent` with a maintainer or project URL": the
+  project name and version, `EVEDW_ESI_CONTACT` and the repository URL.
+- "Send `Accept-Encoding: gzip`": the client asks for gzip.
+- "Cache responses locally and space repeated requests out": one request in
+  flight; requests start at least `EVEDW_ZKILLBOARD_SPACING` (0.2 s) apart
+  and daily history files at least `EVEDW_ZKILLBOARD_DOWNLOAD_SPACING`
+  (1 s) apart, so at most 5 requests a second, a third of R2Z2's "up to 15
+  requests per second per IP". zKillboard names no spacing; these values
+  are ours (5 s and 0.5 s until 2026-10-11, relaxed the same day: a
+  compressed day file already takes a second or two to transfer).
+- History files have a one-day cache: `totals.json` is a conditional GET, a
+  day is downloaded again only when its count or its file's headers
+  changed ("identify missing or changed daily files"), and each day's
+  compact index is fetched with the day file it belongs to.
+- The live feed (M9): "Increment by one after each successful response",
+  about 100 ms between successes, "After a 404, wait at least six seconds
+  before trying again"; files are kept "at least 24 hours"; "A reprocessed
+  killmail may appear again under a new sequence ID".
+- A 403 or 429 is not retried: every zKillboard request stops for an hour,
+  logged at warning level and shown by `evedw zkillboard status`; the third
+  in a UTC day stops zKillboard work until an operator runs `evedw
+  zkillboard resume`. State lives in `data/zkillboard/policy.json`.
+- No polling of `/cache/bypass/healthcheck/`; no query strings on API paths.
+
 ## 12. Verification
 
 `evedw verify [--dataset] [--from --to]`, also scheduled weekly:
@@ -932,6 +1049,10 @@ Binding for every ESI request made by this project, including ad hoc scripts.
   mismatches listed with the gap.
 - Partitions on disk with no registry row, and the reverse.
 - Unknown JSON keys recorded by imports.
+- Killmails across sources (section 7.1): no `killmail_id` twice in the
+  merged layer; per UTC day of `killmail_time`, the merged count at least
+  each source's count of distinct killmails of that day; days a source
+  lacks while the other has killmails, listed per source.
 
 Output is a text table or JSON. It never writes.
 
@@ -949,7 +1070,9 @@ Keys: `DATA_DIR`, `BIND`, `MIN_FREE_GB`, `ESI_CONTACT`, `ESI_DAILY_BUDGET`, `ESI
 `EVEREF_BASE_URL`, `EVEREF_SPACING`, `ESI_BASE_URL`, `SYNC_INTERVAL_KILLMAILS`,
 `SYNC_INTERVAL_MARKET`, `SWEEP_INTERVAL`, `REFRESH_INTERVAL`, `REFRESH_SLICE`,
 `EXPORT_INTERVAL`, `SEED_INTERVAL`, `ALLIANCE_SWEEP_INTERVAL`,
-`AFFILIATION_CYCLE`, `VERIFY_INTERVAL`, `HEAD_DAYS`, `LOG_LEVEL`.
+`AFFILIATION_CYCLE`, `VERIFY_INTERVAL`, `HEAD_DAYS`, `LOG_LEVEL`,
+`ZKILLBOARD_BASE_URL`, `ZKILLBOARD_SPACING`, `ZKILLBOARD_DOWNLOAD_SPACING`,
+`ZKILLBOARD_SYNC_MAX`, `SYNC_INTERVAL_ZKILLBOARD`.
 Intervals are seconds in the environment. Base URLs are overridable so tests
 can point at a local fixture server. `HEAD_DAYS` defaults to 30 (section 6).
 

@@ -10,10 +10,10 @@ def importer_for(dataset: Dataset, lake: Lake, *, entities: EntityStore | None =
         from evedw.jobs.market import MarketHistoryImporter
 
         return MarketHistoryImporter(lake)
-    if dataset.name == "killmails":
+    if dataset.name in ("killmails", "zkillboard_killmails"):
         from evedw.jobs.killmails import KillmailImporter
 
-        return KillmailImporter(lake)
+        return KillmailImporter(lake, source=dataset.source)
     if dataset.name == "entities_backfill":
         from evedw.jobs.entities import BackfillImporter
 

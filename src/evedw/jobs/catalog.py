@@ -15,27 +15,30 @@ from datetime import date
 from typing import Any
 
 from evedw.config import Settings
-from evedw.domain.datasets import DATASETS, ENTITIES_BACKFILL, get_dataset
+from evedw.domain.datasets import ENTITIES_BACKFILL, SYNC_DATASETS, Dataset, get_dataset
 from evedw.domain.ids import RunId
 from evedw.domain.registry import ImportRun, Trigger
 from evedw.jobs.entities import ExportJob
 from evedw.jobs.focus import KINDS as FOCUS_KINDS
 from evedw.jobs.focus import FocusJob
 from evedw.jobs.importers import importer_for
+from evedw.jobs.killmail_merge import MergeJob
 from evedw.jobs.refresh import RefreshJob
 from evedw.jobs.runner import JobFn, JobOutcome, JobRunner, RunContext, WriterLock
 from evedw.jobs.sync import SyncJob
 from evedw.jobs.verify import VerifyJob
 from evedw.sources.esi import EsiClient
 from evedw.sources.everef import EveRefClient
+from evedw.sources.zkillboard import ZKillboardClient
 from evedw.store import open_response_cache
 from evedw.store.base import EntityStore, Lake, Registry
 
 log = logging.getLogger(__name__)
 
-SYNC_JOBS = tuple(f"sync:{name}" for name, ds in DATASETS.items() if ds.index_path)
+SYNC_JOBS = tuple(f"sync:{name}" for name in SYNC_DATASETS)
 JOB_NAMES: tuple[str, ...] = (
     *SYNC_JOBS,
+    "killmails:merge",
     "entities:seed",
     "entities:refresh",
     "entities:export",
@@ -44,7 +47,15 @@ JOB_NAMES: tuple[str, ...] = (
 )
 
 _PARAMS: dict[str, dict[str, str]] = {
-    "sync": {"from": "date", "to": "date", "force": "bool", "sweep": "bool", "offline": "bool"},
+    "sync": {
+        "from": "date",
+        "to": "date",
+        "force": "bool",
+        "sweep": "bool",
+        "offline": "bool",
+        "max_objects": "int",
+    },
+    "killmails:merge": {"from": "date", "to": "date"},
     "entities:seed": {"snapshot": "snapshot", "force": "bool"},
     "entities:refresh": {"budget": "int", "populate": "bool"},
     "entities:export": {},
@@ -60,7 +71,15 @@ _PARAMS: dict[str, dict[str, str]] = {
 """Accepted parameter names and kinds per job. ``sync`` covers every ``sync:*`` job."""
 
 _DEFAULTS: dict[str, dict[str, Any]] = {
-    "sync": {"from": None, "to": None, "force": False, "sweep": False, "offline": False},
+    "sync": {
+        "from": None,
+        "to": None,
+        "force": False,
+        "sweep": False,
+        "offline": False,
+        "max_objects": None,
+    },
+    "killmails:merge": {"from": None, "to": None},
     "entities:seed": {"snapshot": "latest", "force": False},
     "entities:refresh": {"budget": None, "populate": True},
     "entities:export": {},
@@ -187,6 +206,20 @@ class JobCatalog:
                 name, fn, trigger=trigger, params=normalised, run_id=run_id, cancel=cancel
             )
 
+    def _client_for(self, dataset: Dataset) -> EveRefClient:
+        return self._zkillboard() if dataset.source == "zkillboard" else self._everef()
+
+    def _zkillboard(self) -> ZKillboardClient:
+        """Under the zKillboard policy of design §11a."""
+        return ZKillboardClient(
+            self.settings.zkillboard_base_url,
+            policy_path=self.settings.zkillboard_policy_path,
+            contact=self.settings.esi_contact,
+            cache=open_response_cache(self.settings),
+            spacing=self.settings.zkillboard_spacing,
+            download_spacing=self.settings.zkillboard_download_spacing,
+        )
+
     def _everef(self) -> EveRefClient:
         """Listings are revalidated against the store's response cache (design §6)."""
         return EveRefClient(
@@ -212,7 +245,7 @@ class JobCatalog:
     def _build(self, name: str, params: Mapping[str, Any]) -> Generator[JobFn]:
         if name in SYNC_JOBS:
             dataset = get_dataset(name.removeprefix("sync:"))
-            client = self._everef()
+            client = self._client_for(dataset)
             try:
                 yield SyncJob(
                     dataset=dataset,
@@ -223,10 +256,13 @@ class JobCatalog:
                     force=params["force"],
                     sweep=params["sweep"],
                     offline=params["offline"],
+                    max_objects=params["max_objects"],
                     head_days=self.settings.head_days,
                 )
             finally:
                 client.close()
+        elif name == "killmails:merge":
+            yield MergeJob(self.lake, date_from=params["from"], date_to=params["to"])
         elif name == "entities:seed":
             client = self._everef()
             try:
@@ -262,18 +298,18 @@ class JobCatalog:
         elif name == "verify":
             names = [params["dataset"]] if params["dataset"] else list(SYNC_JOBS)
             datasets = [get_dataset(n.removeprefix("sync:")) for n in names]
-            client = None if params["offline"] else self._everef()
+            clients = {} if params["offline"] else {d.name: self._client_for(d) for d in datasets}
             try:
                 yield VerifyJob(
                     self.lake,
                     datasets,
-                    client,
+                    clients,
                     date_from=params["from"],
                     date_to=params["to"],
                     hash_raw=params["hash"],
                 )
             finally:
-                if client is not None:
+                for client in clients.values():
                     client.close()
         else:
             raise UnknownJobError(f"unknown job {name!r}")

@@ -2,8 +2,8 @@
 
 Status: M0 to M5 complete (2026-10-07), M6 (entity coverage) complete
 (2026-10-09), M7 (gentler EVE Ref traffic) complete (2026-10-11). M8 (zKillboard
-as a second killmail source, one merged lake) is next, then M9 (live
-killmails) and M10 (entity discovery and manual add).
+as a second killmail source, one merged lake) code done, live acceptance in
+progress; then M9 (live killmails) and M10 (entity discovery and manual add).
 
 Milestones are ordered so that each one leaves a working, testable system.
 Do not start a milestone before the previous one's acceptance checks pass.
@@ -281,7 +281,7 @@ more only when a year's listing changed. Numbers in design §6.
 
 ## M8. zKillboard as a second killmail source, one merged killmail lake
 
-Not started. Planned 2026-10-11, ahead of entity discovery.
+Code done 2026-10-11; live acceptance in progress.
 
 EVE Ref's daily archives are the only killmail source, and they are not
 complete on their own. Comparing EVE Ref's per-day counts in the lake with
@@ -317,10 +317,10 @@ Deliverables:
   - "Send `Accept-Encoding: gzip`" (or another compression the client
     supports).
   - "Cache responses locally and space repeated requests out": one request
-    in flight; daily history files at least `EVEDW_ZKILLBOARD_SPACING`
-    (default 5 s) apart, so the full history (6,885 files) takes about ten
-    hours and never runs as a burst; well under R2Z2's "up to 15 requests
-    per second per IP".
+    in flight, at most 5 a second (`EVEDW_ZKILLBOARD_SPACING` 0.2 s), daily
+    history files at least `EVEDW_ZKILLBOARD_DOWNLOAD_SPACING` (1 s) apart;
+    well under R2Z2's "up to 15 requests per second per IP". The spacing
+    values are ours, not zKillboard's (relaxed from 5 s on 2026-10-11).
   - History files have a one-day cache: `totals.json` and every day file
     are conditional GETs against the stored validators, and a day is
     downloaded again only when its `totals.json` count, ETag or
@@ -354,8 +354,8 @@ Deliverables:
   immutable ESI killmail and EVE Ref's copy is kept. A merge step rebuilds a
   day, and the days either side of it (upstream files spill over, as on
   2026-01-06), whenever a source partition for those days changes, through
-  `data.parquet.tmp` and `os.replace`; the registry records which source
-  revisions each merged day was built from.
+  `data.parquet.tmp` and `os.replace`; each merged partition's metadata names
+  the source partitions and revisions it was built from.
 - Migration: today's EVE Ref partitions move under `lake/sources/everef/`
   and the merged layer is built from them (and from zKillboard once
   imported), from `raw/` without downloads.

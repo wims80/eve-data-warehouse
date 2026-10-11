@@ -188,13 +188,13 @@ def test_parser_bump_reimports_from_retained_raw(env: SyncEnv) -> None:
     assert partition.metadata["evedw.parser_version"] == "2"
 
 
-def test_upstream_rewritten_between_discovery_and_fetch_fails_that_object(env: SyncEnv) -> None:
+def test_upstream_rewritten_between_discovery_and_fetch_defers_that_object(env: SyncEnv) -> None:
     publish_three_days(env.fake)
     env.fake.serve_instead[D2] = market_csv_bz2(D2, rows=10)
-    with pytest.raises(SyncError, match="1 of 3 objects failed"):
-        env.sync()
-    assert env.obj(D2).status is ObjectStatus.FAILED
-    assert "UpstreamChangedError" in (env.obj(D2).last_error or "")
+    run = env.sync()
+    assert run.status is RunStatus.SUCCEEDED and run.objects_changed == 2
+    assert env.obj(D2).status is ObjectStatus.CHANGED
+    assert "rewritten upstream" in (env.obj(D2).last_error or "")
     assert (
         env.obj(D1).status is ObjectStatus.IMPORTED and env.obj(D3).status is ObjectStatus.IMPORTED
     )

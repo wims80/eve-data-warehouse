@@ -393,3 +393,19 @@ def test_queued_run_becomes_running_when_begun(registry: Registry) -> None:
     assert finished is not None
     assert finished.started_at == NOW + timedelta(minutes=5)
     assert finished.status.finished
+
+
+def test_unfinished_runs_of_a_dead_process_are_cancelled(registry: Registry) -> None:
+    done = registry.start_run("verify", Trigger.MANUAL, {}, now=NOW).run_id
+    registry.finish_run(done, RunStatus.SUCCEEDED, now=NOW)
+    running = registry.start_run("sync:killmails", Trigger.SCHEDULE, {}, now=NOW).run_id
+    queued = registry.queue_run("entities:refresh", Trigger.SCHEDULE, {}, now=NOW).run_id
+    later = NOW + timedelta(minutes=5)
+    assert registry.cancel_unfinished_runs(now=later, error="interrupted") == 2
+    for run_id in (running, queued):
+        run = registry.get_run(run_id)
+        assert run is not None and run.status is RunStatus.CANCELLED
+        assert run.error == "interrupted" and run.finished_at == later
+    finished = registry.get_run(done)
+    assert finished is not None and finished.status is RunStatus.SUCCEEDED
+    assert registry.cancel_unfinished_runs(now=later, error="interrupted") == 0

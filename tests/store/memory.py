@@ -354,6 +354,17 @@ class MemoryRegistry:
                     error=error,
                 )
 
+    def cancel_unfinished_runs(self, *, now: datetime, error: str) -> int:
+        with self._lock:
+            unfinished = [
+                r for r in self._runs.values() if r.status in (RunStatus.QUEUED, RunStatus.RUNNING)
+            ]
+            for run in unfinished:
+                self._runs[run.run_id] = replace(
+                    run, finished_at=_utc(now), status=RunStatus.CANCELLED, error=error
+                )
+        return len(unfinished)
+
     def get_run(self, run_id: RunId) -> ImportRun | None:
         with self._lock:
             return self._runs.get(run_id)

@@ -72,6 +72,7 @@ async def test_health_and_empty_listings(api: httpx.AsyncClient, settings: Setti
         "entities_backfill",
         "killmails",
         "market_history",
+        "zkillboard_killmails",
     ]
     assert datasets["entities"]["characters"] == 0
     assert (await api.get("/runs")).json() == {"runs": []}
@@ -184,7 +185,7 @@ async def test_jobs_run_one_at_a_time_and_failures_are_recorded(
     api: httpx.AsyncClient, fake: FakeEveRef
 ) -> None:
     publish_three_days(fake)
-    fake.serve_instead[D3] = b"not the file"  # download fails on size/etag mismatch
+    fake.put(D3, b"not a bz2 archive")  # the import fails
     first = (await api.post("/jobs/sync:market_history", json={"from": str(D3)})).json()
     second = (await api.post("/jobs/entities:export", json={})).json()
     health = (await api.get("/health")).json()

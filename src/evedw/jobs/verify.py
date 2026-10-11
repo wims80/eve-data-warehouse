@@ -11,7 +11,13 @@ from pathlib import Path
 from evedw.config import Settings
 from evedw.domain.datasets import Dataset
 from evedw.domain.registry import ObjectStatus
-from evedw.domain.schemas import DATASET_TABLES, partition_date, partition_name
+from evedw.domain.schemas import (
+    DATASET_TABLES,
+    KILLMAIL_SOURCES,
+    partition_date,
+    partition_name,
+    source_table,
+)
 from evedw.jobs.runner import JobOutcome, RunContext
 from evedw.sources.everef import EveRefClient
 from evedw.store.base import Lake, Registry
@@ -33,6 +39,9 @@ class VerifyReport:
     objects_checked: int = 0
     raw_files_hashed: int = 0
     issues: list[Issue] = field(default_factory=lambda: [])
+    notes: list[Issue] = field(default_factory=lambda: [])
+    """Findings about the sources that the warehouse cannot fix, such as a day one
+    upstream lacks; reported, never a failure."""
 
     @property
     def ok(self) -> bool:
@@ -46,6 +55,7 @@ class VerifyReport:
                 "raw_files_hashed": self.raw_files_hashed,
                 "ok": self.ok,
                 "issues": [asdict(i) for i in self.issues],
+                "notes": [asdict(i) for i in self.notes],
             },
             indent=2,
         )
@@ -59,6 +69,8 @@ class VerifyReport:
         for issue in self.issues:
             where = issue.object_key or "-"
             lines.append(f"  {issue.kind:<18} {where:<44} {issue.detail}")
+        for note in self.notes:
+            lines.append(f"  note: {note.kind:<18} {note.detail}")
         return "\n".join(lines)
 
 
@@ -180,6 +192,60 @@ def verify_dataset(
     return report
 
 
+MERGED = "killmails:merged"
+"""Report name of the cross-source killmail checks."""
+
+
+def verify_killmail_layers(
+    lake: Lake, *, date_from: date | None = None, date_to: date | None = None
+) -> VerifyReport:
+    """Design §12: no killmail twice in the merged layer; each merged day holds at least
+    every source's distinct killmails of that day; days one source lacks, as notes."""
+    report = VerifyReport(dataset=MERGED)
+
+    def counts(table: str) -> dict[date, tuple[int, int]]:
+        rows = lake.killmail_day_counts(table).to_pylist()
+        return {
+            r["day"]: (int(r["killmails"]), int(r["distinct_ids"]))
+            for r in rows
+            if (date_from is None or r["day"] >= date_from)
+            and (date_to is None or r["day"] <= date_to)
+        }
+
+    merged = counts("killmails")
+    sources = {s: counts(source_table(s, "killmails")) for s in KILLMAIL_SOURCES}
+    if not merged and not any(sources.values()):
+        return report
+    report.objects_checked = len(merged)
+    duplicated = sum(rows - ids for rows, ids in merged.values())
+    if duplicated:
+        report.issues.append(
+            Issue(MERGED, None, "duplicate_killmail", f"{duplicated} rows repeat a killmail_id")
+        )
+    days = sorted(set(merged).union(*(set(c) for c in sources.values())))
+    for day in days:
+        have = merged.get(day, (0, 0))[1]
+        for source, by_day in sources.items():
+            ids = by_day.get(day, (0, 0))[1]
+            if ids > have:
+                report.issues.append(
+                    Issue(
+                        MERGED,
+                        None,
+                        "merged_short",
+                        f"{day}: merged has {have} killmails, {source} has {ids}",
+                    )
+                )
+        present = {s: by_day[day][1] for s, by_day in sources.items() if day in by_day}
+        for source in KILLMAIL_SOURCES:
+            if source not in present and present:
+                others = ", ".join(f"{s} has {n:,}" for s, n in present.items())
+                report.notes.append(
+                    Issue(MERGED, None, "source_lacks_day", f"{source} lacks {day} ({others})")
+                )
+    return report
+
+
 class VerifyError(RuntimeError):
     """The scheduled verify found issues. The run is recorded as failed with the summary
     so drift shows up in the run log; the detail is in the service log."""
@@ -191,8 +257,9 @@ class VerifyJob:
 
     lake: Lake
     datasets: list[Dataset]
-    client: EveRefClient | None
-    """Source of totals.json; ``None`` skips the expected-count check."""
+    clients: Mapping[str, EveRefClient]
+    """Source of each dataset's totals.json by dataset name; a dataset without one skips
+    the expected-count check."""
     date_from: date | None = None
     date_to: date | None = None
     hash_raw: bool = True
@@ -202,11 +269,8 @@ class VerifyJob:
         issues: list[Issue] = []
         for dataset in self.datasets:
             ctx.check_cancelled()
-            totals = (
-                self.client.totals(dataset)
-                if self.client is not None and dataset.totals_path
-                else None
-            )
+            client = self.clients.get(dataset.name)
+            totals = client.totals(dataset) if client is not None and dataset.totals_path else None
             report = verify_dataset(
                 ctx.settings,
                 ctx.registry,
@@ -228,6 +292,16 @@ class VerifyJob:
                     extra={"dataset": issue.dataset},
                 )
             log.info("%s", report.to_text().splitlines()[0])
+        if any(d.name in ("killmails", "zkillboard_killmails") for d in self.datasets):
+            merged = verify_killmail_layers(
+                self.lake, date_from=self.date_from, date_to=self.date_to
+            )
+            issues.extend(merged.issues)
+            for issue in merged.issues:
+                log.warning("%s %s", issue.kind, issue.detail, extra={"dataset": MERGED})
+            for note in merged.notes:
+                log.info("note: %s %s", note.kind, note.detail, extra={"dataset": MERGED})
+            log.info("%s", merged.to_text().splitlines()[0])
         if issues:
             kinds = sorted({i.kind for i in issues})
             raise VerifyError(f"{len(issues)} issues ({', '.join(kinds)}) in {checked} objects")

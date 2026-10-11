@@ -1,5 +1,8 @@
-"""Killmail importer: one ``killmails-<date>.tar.bz2`` becomes three partitions,
-``killmails``, ``attackers`` and ``items``, all keyed by ``source_date``.
+"""Killmail importers: one upstream day file becomes three per-source partitions,
+``<source>_killmails``, ``<source>_attackers`` and ``<source>_items``, keyed by the file's
+``source_date``; a sync then merges the days it touched (design §7.1, ``killmail_merge``).
+EVE Ref ships ``killmails-<date>.tar.bz2``; zKillboard one JSON object per day plus an
+index of hashes.
 
 The archive's JSON members are concatenated into one NDJSON file and read by DuckDB with
 an explicit schema. Schema inference is never used: it drifts between days. Keys that are
@@ -9,18 +12,21 @@ under ``evedw.unknown_keys`` so ``verify`` can surface them.
 Measured on killmails-2026-10-01 (14,807 killmails): about one second per day.
 """
 
+import gzip
 import json
 import logging
+from collections.abc import Collection
 from datetime import date
 from pathlib import Path
 
 import duckdb
 import pyarrow as pa
 
-from evedw.domain.datasets import KILLMAILS, Dataset
+from evedw.domain.datasets import KILLMAILS, ZKILLBOARD_KILLMAILS, Dataset
 from evedw.domain.registry import SourceObject, SourceRevision
-from evedw.domain.schemas import ATTACKERS, ITEMS, partition_name
+from evedw.domain.schemas import ATTACKERS, ITEMS, partition_name, source_table
 from evedw.domain.schemas import KILLMAILS as KILLMAILS_SCHEMA
+from evedw.jobs.killmail_merge import KillmailMerge
 from evedw.jobs.runner import RunContext
 from evedw.jobs.sync import ImportResult, partition_metadata
 from evedw.sources.archives import tar_json_to_ndjson
@@ -214,13 +220,57 @@ def normalise_day(
         con.close()
 
 
+def zkillboard_day_to_ndjson(raw_file: Path, index_file: Path, ndjson: Path) -> int:
+    """Write zKillboard's day object (killmail id -> ESI killmail) as one NDJSON line per
+    killmail, with ``killmail_hash`` from the day's index. Returns the killmail count."""
+    with gzip.open(raw_file, "rt", encoding="utf-8") as fh:
+        day = json.load(fh)
+    hashes: dict[str, object] = {}
+    if index_file.is_file():
+        with gzip.open(index_file, "rt", encoding="utf-8") as fh:
+            index = json.load(fh)
+        if isinstance(index, dict):
+            hashes = {str(k): v for k, v in index.items()}  # pyright: ignore[reportUnknownVariableType, reportUnknownArgumentType]
+    if not isinstance(day, dict):
+        raise ValueError(f"{raw_file}: expected a JSON object of killmails")
+    count = 0
+    with ndjson.open("w", encoding="utf-8") as out:
+        for killmail_id, killmail in sorted(day.items()):  # pyright: ignore[reportUnknownVariableType, reportUnknownArgumentType]
+            if not isinstance(killmail, dict):
+                continue
+            row: dict[str, object] = dict(killmail)  # pyright: ignore[reportUnknownArgumentType]
+            row.setdefault("killmail_id", int(killmail_id))  # pyright: ignore[reportUnknownArgumentType]
+            hashed = hashes.get(str(killmail_id))  # pyright: ignore[reportUnknownArgumentType]
+            if isinstance(hashed, str):
+                row["killmail_hash"] = hashed
+            out.write(json.dumps(row, separators=(",", ":")) + "\n")
+            count += 1
+    return count
+
+
 class KillmailImporter:
-    def __init__(self, lake: Lake) -> None:
+    """EVE Ref's archives by default; ``source="zkillboard"`` reads zKillboard's day files."""
+
+    def __init__(self, lake: Lake, *, source: str = "everef") -> None:
         self._lake = lake
+        self._source = source
 
     @property
     def dataset(self) -> Dataset:
-        return KILLMAILS
+        return ZKILLBOARD_KILLMAILS if self._source == "zkillboard" else KILLMAILS
+
+    def finish(self, ctx: RunContext, days: Collection[date]) -> None:
+        """Merge every day the imported source days can reach."""
+        if not days:
+            return
+        merge = KillmailMerge(self._lake)
+        report = merge.merge(merge.affected(days), cancel=ctx.check_cancelled)
+        log.info(
+            "merged %d days: %d killmails, %d from several sources",
+            report.days,
+            report.killmails,
+            report.from_several,
+        )
 
     def import_revision(
         self,
@@ -235,15 +285,19 @@ class KillmailImporter:
             raise ValueError(f"{obj.object_key} has no logical date")
         ndjson = scratch_dir / f"{obj.object_key.replace('/', '_')}.ndjson"
         try:
-            extracted = tar_json_to_ndjson(raw_file, ndjson)
+            if self._source == "zkillboard":
+                index_file = raw_file.with_name(raw_file.name.replace(".json.gz", ".index.json.gz"))
+                documents = zkillboard_day_to_ndjson(raw_file, index_file, ndjson)
+            else:
+                documents = tar_json_to_ndjson(raw_file, ndjson).documents
             tables, unknown = normalise_day(ndjson, obj.logical_date)
         finally:
             ndjson.unlink(missing_ok=True)
         if unknown:
             log.warning("unknown JSON keys in %s: %s", obj.object_key, unknown)
-        if tables["killmails"].num_rows != extracted.documents:
+        if tables["killmails"].num_rows != documents:
             raise ValueError(
-                f"{extracted.documents} documents in archive but {tables['killmails'].num_rows} "
+                f"{documents} documents in archive but {tables['killmails'].num_rows} "
                 "killmail rows parsed"
             )
         metadata = partition_metadata(
@@ -254,7 +308,10 @@ class KillmailImporter:
         )
         partitions = [
             self._lake.write_partition(
-                table, partition_name(table, obj.logical_date), data, metadata=metadata
+                source_table(self._source, table),
+                partition_name(table, obj.logical_date),
+                data,
+                metadata=metadata,
             )
             for table, data in (
                 ("attackers", tables["attackers"]),

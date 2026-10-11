@@ -36,4 +36,9 @@ def test_entities_backfill_has_no_index() -> None:
 def test_unknown_dataset() -> None:
     with pytest.raises(KeyError, match="unknown dataset 'nope'"):
         get_dataset("nope")
-    assert set(DATASETS) == {"killmails", "market_history", "entities_backfill"}
+    assert set(DATASETS) == {
+        "killmails",
+        "market_history",
+        "entities_backfill",
+        "zkillboard_killmails",
+    }

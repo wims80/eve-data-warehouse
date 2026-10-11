@@ -328,6 +328,31 @@ Requests start at least `EVEDW_EVEREF_SPACING` (0.5 s) apart, two in
 flight at most. A `429` from EVE Ref's Cloudflare front is retried after
 `Retry-After`, at least 30 seconds, doubling per attempt.
 
+## Killmails from two sources
+
+Killmails come from EVE Ref (`sync:killmails`) and zKillboard's R2Z2
+history (`sync:zkillboard_killmails`, hourly, at most
+`EVEDW_ZKILLBOARD_SYNC_MAX` days a run, 1,000 by default, so its first
+import of the whole history takes about seven hourly runs). Each sync merges the days it touched into the
+merged `killmails`, `attackers` and `items` tables (design §7.1). To rebuild
+the merged layer, all of it (about 12 minutes) or a range:
+
+```
+evedw killmails merge
+evedw killmails merge --from 2026-01-01 --to 2026-01-31
+```
+
+Every zKillboard request follows the policy of design §11a. A 403 or 429
+pauses zKillboard work for an hour; the third in a UTC day stops it:
+
+```
+evedw zkillboard status
+evedw zkillboard resume      # after finding out why
+```
+
+`evedw verify` checks the merged layer against both sources and lists the
+days one source lacks as notes.
+
 ## ESI downtime
 
 ESI work pauses every day around EVE's downtime at 11:00 UTC (design §11):

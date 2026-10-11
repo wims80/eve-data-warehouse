@@ -28,7 +28,7 @@ con.execute(subprocess.run(["uv", "run", "evedw", "views"], capture_output=True,
 
 top_systems = con.execute("""
     SELECT solar_system_id, count(*) AS kills
-    FROM killmails_unique
+    FROM killmails
     WHERE source_date BETWEEN DATE '2026-09-01' AND DATE '2026-09-30'
     GROUP BY 1 ORDER BY 2 DESC LIMIT 10
 """).fetchall()
@@ -46,10 +46,25 @@ pyarrow and Polars should also scan the directories plainly, or declare the
 partition column as a date; their hive mode infers it as a string and
 conflicts with the column in the file.
 
+## Killmails: one merged table
+
+`killmails`, `attackers` and `items` are the merged killmail layer (design
+§7.1): every killmail that EVE Ref or zKillboard has, once. `source_date` is
+the UTC day of `killmail_time`, and `killmails.sources` lists which sources
+had it (`everef`, `zkillboard`). Neither source is complete on its own (EVE
+Ref lacks 2026-07-13, zKillboard's history most of 2023-05-06), and EVE Ref's
+files sometimes repeat the previous day's killmails; the merged table has none
+of those gaps or repeats. `killmails_unique` is gone, `killmails` already has
+one row per killmail. The per-source tables under `lake/sources/` are the
+warehouse's own bookkeeping; do not read them.
+
 ## Incremental pulls over the API
 
 A consumer that keeps its own copy asks which objects changed since its last
-pull, then reads those days. The timestamp needs a timezone.
+pull, then reads those days. The timestamp needs a timezone. For killmails,
+a source file's day can change the merged table on that day and the days
+either side of it, so read those three days (`killmails` objects are EVE
+Ref's files, `zkillboard_killmails` zKillboard's).
 
 ```python
 """Pull the killmail days imported since the last pull, as Arrow, then read one

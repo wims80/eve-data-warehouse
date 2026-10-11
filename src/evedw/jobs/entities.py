@@ -7,9 +7,9 @@ reported, never silently absorbed, and a missing one becomes NULL.
 """
 
 import logging
-from collections.abc import Iterable, Mapping
+from collections.abc import Collection, Iterable, Mapping
 from dataclasses import dataclass
-from datetime import UTC, datetime
+from datetime import UTC, date, datetime
 from pathlib import Path
 from typing import Any
 
@@ -362,6 +362,9 @@ class BackfillImporter:
     @property
     def dataset(self) -> Dataset:
         return ENTITIES_BACKFILL
+
+    def finish(self, ctx: RunContext, days: Collection[date]) -> None:
+        """Nothing to do after the run."""
 
     def import_revision(
         self,

@@ -187,9 +187,9 @@ def test_sync_killmails_end_to_end(env: SyncEnv, tmp_path: Path) -> None:
     archive = KILLMAIL_FIXTURE.read_bytes()
     fake.put(DAY, archive, expected=50)
     day2 = date(2026, 10, 2)
+    # EVE Ref's file for the next day repeats ten killmails of this one, as its 2026-01-06
+    # file does for 2026-01-05: the same immutable killmails, killmail_time unchanged.
     docs = fixture_documents()[:10]
-    for doc in docs:
-        doc["killmail_time"] = "2026-10-02T01:00:00Z"
     fake.put(day2, make_archive(tmp_path / "d2.tar.bz2", docs), expected=11)
 
     run = env.sync(KILLMAILS)
@@ -203,29 +203,36 @@ def test_sync_killmails_end_to_end(env: SyncEnv, tmp_path: Path) -> None:
     rev2 = env.registry.current_revision("killmails", "2026/killmails-2026-10-02.tar.bz2")
     assert rev2 is not None and rev2.observed_count == 10 and rev2.verified is False
 
-    for table in ("killmails", "attackers", "items"):
+    # The per-source layer keeps each file as it is.
+    for table in ("everef_killmails", "everef_attackers", "everef_items"):
         names = [p.partition for p in env.lake.partitions(table)]
         assert names == ["source_date=2026-10-01", "source_date=2026-10-02"]
-    assert env.lake.read("killmails").num_rows == 60
-    assert env.lake.read("attackers", date_from=DAY, date_to=DAY).num_rows == 348
-    assert env.lake.read("items", date_from=DAY, date_to=DAY).num_rows == 914
-    (info,) = [p for p in env.lake.partitions("killmails") if p.partition.endswith("10-01")]
+    assert env.lake.read("everef_killmails").num_rows == 60
+    (info,) = [p for p in env.lake.partitions("everef_killmails") if p.partition.endswith("10-01")]
     assert info.metadata["evedw.unknown_keys"] == "{}"
+
+    # The merged layer has every killmail once, on the day of its killmail_time.
+    for table in ("killmails", "attackers", "items"):
+        assert [p.partition for p in env.lake.partitions(table)] == ["source_date=2026-10-01"]
+    merged = env.lake.read("killmails")
+    assert merged.num_rows == 50
+    assert {tuple(s or ()) for s in merged.column("sources").to_pylist()} == {("everef",)}
+    assert env.lake.read("attackers").num_rows == 348
+    assert env.lake.read("items").num_rows == 914
+    (merged_info,) = env.lake.partitions("killmails")
+    built_from = {b["partition"] for b in json.loads(merged_info.metadata["evedw.built_from"])}
+    assert built_from == {"source_date=2026-10-01", "source_date=2026-10-02"}
 
     report = verify_dataset(env.settings, env.registry, env.lake, KILLMAILS, totals=fake.totals)
     assert [i.kind for i in report.issues] == ["expected_count"]
     assert report.objects_checked == 2
 
-    # The same ids appear on both days; the unique view keeps the newest source_date.
     import duckdb
 
     con = duckdb.connect()
     con.execute(env.lake.view_sql())
-    assert con.execute("SELECT count(*) FROM killmails").fetchone() == (60,)
-    assert con.execute("SELECT count(*) FROM killmails_unique").fetchone() == (50,)
-    assert con.execute(
-        "SELECT count(*) FROM killmails_unique WHERE source_date = DATE '2026-10-02'"
-    ).fetchone() == (10,)
+    counts = con.execute("SELECT count(*), count(DISTINCT killmail_id) FROM killmails").fetchone()
+    assert counts == (50, 50)
 
 
 def test_sync_rejects_deeper_nesting_as_a_failed_object(env: SyncEnv, tmp_path: Path) -> None:

@@ -25,7 +25,9 @@ def test_default_jobs_skip_refresh_without_contact(settings: Settings) -> None:
     assert names == [
         "sync:killmails",
         "sync:market_history",
+        "sync:zkillboard_killmails",
         "sync:killmails sweep",
+        "sync:zkillboard_killmails sweep",
         "sync:market_history sweep",
         "entities:seed",
         "entities:export",

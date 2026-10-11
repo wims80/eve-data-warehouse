@@ -147,12 +147,49 @@ CORPORATION_ALLIANCE_HISTORY = pa.schema(
     ]
 )
 
+MERGED_KILLMAILS = KILLMAILS.append(pa.field("sources", pa.list_(pa.string())))
+"""The merged killmail table: one row per killmail, ``sources`` naming every source that
+has it (design §7.1)."""
+
+KILLMAIL_SOURCES: tuple[str, ...] = ("everef", "zkillboard")
+"""Killmail sources in order of precedence: where several have a killmail, the first one's
+rows go into the merged layer."""
+
+KILLMAIL_TABLES: tuple[str, ...] = ("killmails", "attackers", "items")
+
+SOURCE_TABLES: dict[str, pa.Schema] = {
+    f"{source}_{table}": schema
+    for source in KILLMAIL_SOURCES
+    for table, schema in (("killmails", KILLMAILS), ("attackers", ATTACKERS), ("items", ITEMS))
+}
+"""Per-source killmail tables, e.g. ``everef_killmails``. Not for consumers."""
+
 LAKE_TABLES: dict[str, pa.Schema] = {
-    "killmails": KILLMAILS,
+    "killmails": MERGED_KILLMAILS,
     "attackers": ATTACKERS,
     "items": ITEMS,
     "market_history": MARKET_HISTORY,
 }
+"""The tables consumers read."""
+
+ALL_LAKE_TABLES: dict[str, pa.Schema] = {**LAKE_TABLES, **SOURCE_TABLES}
+
+
+def source_table(source: str, table: str) -> str:
+    """``source_table("everef", "killmails")`` -> ``everef_killmails``."""
+    if source not in KILLMAIL_SOURCES or table not in KILLMAIL_TABLES:
+        raise KeyError(f"no source table for {source!r}, {table!r}")
+    return f"{source}_{table}"
+
+
+def table_path(table: str) -> str:
+    """Directory of a lake table relative to the lake: ``sources/everef/killmails`` for a
+    source table, the table name otherwise."""
+    if table in SOURCE_TABLES:
+        source, _, name = table.partition("_")
+        return f"sources/{source}/{name}"
+    return table
+
 
 ENTITY_TABLES: dict[str, pa.Schema] = {
     "characters": CHARACTERS,
@@ -177,6 +214,7 @@ PARTITION_COLUMN: dict[str, str] = {
     "attackers": "source_date",
     "items": "source_date",
     "market_history": "date",
+    **dict.fromkeys(SOURCE_TABLES, "source_date"),
 }
 
 
@@ -194,7 +232,8 @@ def partition_date(partition: str) -> date | None:
 
 
 DATASET_TABLES: dict[str, tuple[str, ...]] = {
-    "killmails": ("killmails", "attackers", "items"),
+    "killmails": ("everef_killmails", "everef_attackers", "everef_items"),
+    "zkillboard_killmails": ("zkillboard_killmails", "zkillboard_attackers", "zkillboard_items"),
     "market_history": ("market_history",),
 }
 """Lake tables each dataset fills. The first table is the one whose row count is the

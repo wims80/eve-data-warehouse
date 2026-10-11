@@ -6,7 +6,7 @@ The loop is the same for every index-driven dataset. What differs per dataset is
 
 import logging
 import shutil
-from collections.abc import Iterable
+from collections.abc import Collection, Iterable
 from dataclasses import dataclass, field, replace
 from datetime import UTC, date, datetime, timedelta
 from pathlib import Path
@@ -26,7 +26,7 @@ from evedw.domain.registry import (
 )
 from evedw.jobs.runner import JobCancelled, JobOutcome, RunContext
 from evedw.logs import log_context
-from evedw.sources.everef import CONCURRENCY, EveRefClient
+from evedw.sources.everef import CONCURRENCY, EveRefClient, UpstreamChangedError
 from evedw.store.base import PartitionInfo
 
 log = logging.getLogger(__name__)
@@ -60,6 +60,11 @@ class Importer(Protocol):
         scratch_dir: Path,
     ) -> ImportResult:
         """Normalise ``raw_file`` into the lake. Must not touch the registry."""
+        ...
+
+    def finish(self, ctx: RunContext, days: Collection[date]) -> None:
+        """After the run's imports, with the logical days it imported: killmails merge
+        them into the merged layer; other datasets do nothing."""
         ...
 
 
@@ -102,6 +107,9 @@ class SyncJob:
     sweep: bool = False
     """Refresh headers of every object, catching rewrites of old days."""
     head_workers: int = CONCURRENCY
+    max_objects: int | None = None
+    """Import at most this many objects, newest first, and leave the rest for the next run:
+    the first zKillboard history import runs in slices (design §7.1)."""
     offline: bool = False
     """Send no requests: skip discovery and import only objects whose current upstream
     etag has a retained raw file. With ``force`` this rebuilds the lake from ``raw/``."""
@@ -187,7 +195,17 @@ class SyncJob:
             if (
                 self.sweep
                 or known is None
-                or known.status in PENDING_STATUSES
+                # A pending object is about to be downloaded, so its headers must be fresh;
+                # from an unchanged listing they were checked when it last changed, unless
+                # the last attempt failed (design §6).
+                or (
+                    known.status in PENDING_STATUSES
+                    and (
+                        not obj.listing_unchanged
+                        or known.status is ObjectStatus.FAILED
+                        or known.last_error is not None
+                    )
+                )
                 or (known.differs_from(obj) and not obj.listing_unchanged)
                 or (obj.logical_date is not None and obj.logical_date >= tail_start)
             ):
@@ -206,7 +224,7 @@ class SyncJob:
             return found
         log.info("refreshing headers of %d of %d objects", len(selected), len(found))
         refreshed = self.client.refresh_headers(
-            (found[i] for i in selected), workers=self.head_workers
+            (found[i] for i in selected), workers=self.head_workers, cancel=ctx.check_cancelled
         )
         result = list(found)
         for index, obj in zip(selected, refreshed, strict=True):
@@ -253,12 +271,18 @@ class SyncJob:
                     len(pending) - len(retained),
                 )
             pending = retained
-        log.info("%d objects pending", len(pending))
+        if self.max_objects is not None and len(pending) > self.max_objects:
+            log.info("%d objects pending, importing the newest %d", len(pending), self.max_objects)
+            pending = pending[: self.max_objects]
+        else:
+            log.info("%d objects pending", len(pending))
         scratch = ctx.settings.scratch_dir / ctx.run_id
         scratch.mkdir(parents=True, exist_ok=True)
         imported = 0
         rows = 0
         failures: list[str] = []
+        deferred = 0
+        days: set[date] = set()
         try:
             for obj in pending:
                 ctx.check_cancelled()
@@ -266,13 +290,21 @@ class SyncJob:
                     try:
                         rows += self._process(ctx, obj, scratch)
                         imported += 1
+                        if obj.logical_date is not None:
+                            days.add(obj.logical_date)
                     except (KeyboardInterrupt, JobCancelled):
                         raise
+                    except UpstreamChangedError as exc:
+                        deferred += 1
+                        log.info("rewritten upstream during the sync, retried next sync: %s", exc)
                     except Exception as exc:
                         log.exception("object failed")
                         failures.append(f"{obj.object_key}: {type(exc).__name__}: {exc}")
         finally:
             shutil.rmtree(scratch, ignore_errors=True)
+        self.importer.finish(ctx, days)
+        if deferred:
+            log.info("%d objects were rewritten upstream during the sync; next sync", deferred)
         if failures:
             raise SyncError(
                 f"{len(failures)} of {len(pending)} objects failed "
@@ -322,6 +354,16 @@ class SyncJob:
         except (KeyboardInterrupt, JobCancelled):
             registry.mark(
                 self.dataset.name, obj.object_key, ObjectStatus.FAILED, error="interrupted"
+            )
+            raise
+        except UpstreamChangedError as exc:
+            # Rewritten upstream since discovery: not a failure, the next sync takes fresh
+            # headers (last_error is set) and fetches the new file (design §6).
+            registry.mark(
+                self.dataset.name,
+                obj.object_key,
+                ObjectStatus.CHANGED,
+                error=f"rewritten upstream during the sync: {exc}",
             )
             raise
         except Exception as exc:

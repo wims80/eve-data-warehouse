@@ -10,6 +10,7 @@ import contextlib
 import logging
 from collections.abc import AsyncGenerator
 from contextlib import asynccontextmanager
+from datetime import UTC, datetime
 
 from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse
@@ -43,7 +44,16 @@ def create_app(settings: Settings, *, schedule: bool = True) -> FastAPI:
         try:
             if registry.schema_version() == 0:
                 raise NotMigratedError("registry is not migrated; run `evedw migrate` first")
+            orphans = registry.cancel_unfinished_runs(
+                now=datetime.now(UTC), error="interrupted: the service stopped before it finished"
+            )
+            if orphans:
+                log.warning(
+                    "recorded %d unfinished runs of an earlier process as cancelled", orphans
+                )
             lake_store = open_lake(settings)
+            if lake_store.layout_version() < 2:
+                raise NotMigratedError("the lake has an old layout; run `evedw migrate` first")
             entities = open_entity_store(settings)
             queries = open_queries(settings, lake_store)
             catalog = JobCatalog(settings, registry, lake_store, entities)

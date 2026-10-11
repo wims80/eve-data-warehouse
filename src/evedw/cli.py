@@ -17,26 +17,33 @@ import typer
 
 from evedw import __version__
 from evedw.config import Settings
-from evedw.domain.datasets import DATASETS, get_dataset
+from evedw.domain.datasets import DATASETS, SYNC_DATASETS, Dataset, get_dataset
 from evedw.domain.registry import DatasetSummary, ImportRun, RunStatus, Trigger
 from evedw.domain.schemas import ENTITY_TABLES
 from evedw.domain.speed import Sample, describe
 from evedw.jobs.catalog import JobCatalog, UnknownJobError
 from evedw.jobs.refresh import refresh_status
 from evedw.jobs.runner import JobCancelled, LockHeldError, WriterLock
-from evedw.jobs.verify import VerifyReport, verify_dataset
+from evedw.jobs.verify import VerifyReport, verify_dataset, verify_killmail_layers
 from evedw.logs import setup_logging
 from evedw.service.client import ServiceClient, ServiceError, find_service
 from evedw.sources.esi import load_policy, save_policy
 from evedw.sources.everef import EveRefClient
+from evedw.sources.zkillboard import ZKillboardClient
+from evedw.sources.zkillboard import load_policy as load_zkillboard_policy
+from evedw.sources.zkillboard import save_policy as save_zkillboard_policy
 from evedw.store import open_entity_store, open_lake, open_registry
 from evedw.store.base import Registry
 
 app = typer.Typer(no_args_is_help=True, help="EVE data warehouse.")
 entities_app = typer.Typer(no_args_is_help=True, help="Character, corporation and alliance tables.")
 esi_app = typer.Typer(no_args_is_help=True, help="ESI policy state.")
+killmails_app = typer.Typer(no_args_is_help=True, help="The merged killmail layer.")
+zkillboard_app = typer.Typer(no_args_is_help=True, help="zKillboard policy state.")
 app.add_typer(entities_app, name="entities")
 app.add_typer(esi_app, name="esi")
+app.add_typer(killmails_app, name="killmails")
+app.add_typer(zkillboard_app, name="zkillboard")
 
 DATE_FORMATS = ["%Y-%m-%d"]
 
@@ -187,10 +194,15 @@ def migrate(ctx: typer.Context) -> None:
     with _writer(settings) as (_, registry):
         before = registry.schema_version()
         after = registry.migrate()
+        moved = open_lake(settings).migrate_layout()
     if after == before:
         print(f"registry schema is current at version {after}")
     else:
         print(f"registry schema upgraded from version {before} to {after}")
+    for line in moved:
+        print(f"lake: {line}")
+    if any(line.startswith("moved ") for line in moved):
+        print("lake: build the merged killmail layer with `evedw killmails merge`")
 
 
 @app.command()
@@ -369,7 +381,7 @@ def verify(
     With a service running, the check runs there as a `verify` job and this command
     reports the run; the issue list is in the service log."""
     settings = _state(ctx).settings
-    names = [dataset] if dataset else [n for n in DATASETS if DATASETS[n].index_path]
+    names = [dataset] if dataset else list(SYNC_DATASETS)
     try:
         datasets = [get_dataset(n) for n in names]
     except KeyError as exc:
@@ -397,19 +409,12 @@ def verify(
     settings.ensure_dirs()
     registry = open_registry(settings, read_only=True)
     lake = open_lake(settings)
-    client = (
-        None
-        if offline
-        else EveRefClient(
-            settings.everef_base_url,
-            contact=settings.esi_contact,
-            spacing=settings.everef_spacing,
-        )
-    )
+    clients = {} if offline else {ds.name: _source_client(settings, ds) for ds in datasets}
     failed = False
     try:
         reports: list[VerifyReport] = []
         for ds in datasets:
+            client = clients.get(ds.name)
             totals = client.totals(ds) if client is not None and ds.totals_path else None
             report = verify_dataset(
                 settings,
@@ -423,6 +428,10 @@ def verify(
             )
             reports.append(report)
             failed = failed or not report.ok
+        if any(ds.name in ("killmails", "zkillboard_killmails") for ds in datasets):
+            merged = verify_killmail_layers(lake, date_from=_day(date_from), date_to=_day(date_to))
+            reports.append(merged)
+            failed = failed or not merged.ok
         if as_json:
             print("[" + ",\n".join(r.to_json() for r in reports) + "]")
         else:
@@ -430,10 +439,24 @@ def verify(
                 print(report.to_text())
     finally:
         registry.close()
-        if client is not None:
+        for client in clients.values():
             client.close()
     if failed:
         raise typer.Exit(code=1)
+
+
+def _source_client(settings: Settings, dataset: Dataset) -> EveRefClient:
+    """The upstream client of a dataset, for reading its totals."""
+    if dataset.source == "zkillboard":
+        return ZKillboardClient(
+            settings.zkillboard_base_url,
+            policy_path=settings.zkillboard_policy_path,
+            contact=settings.esi_contact,
+            spacing=settings.zkillboard_spacing,
+        )
+    return EveRefClient(
+        settings.everef_base_url, contact=settings.esi_contact, spacing=settings.everef_spacing
+    )
 
 
 @app.command()
@@ -685,3 +708,63 @@ def esi_resume(ctx: typer.Context) -> None:
     policy.stopped = None
     save_policy(settings.esi_policy_path, policy)
     print(f"cleared stop: {reason}")
+
+
+# --- killmails ----------------------------------------------------------------------------
+
+
+@killmails_app.command("merge")
+def killmails_merge(
+    ctx: typer.Context,
+    date_from: Annotated[
+        datetime | None,
+        typer.Option("--from", formats=DATE_FORMATS, help="First merged day, inclusive."),
+    ] = None,
+    date_to: Annotated[
+        datetime | None,
+        typer.Option("--to", formats=DATE_FORMATS, help="Last merged day, inclusive."),
+    ] = None,
+    no_wait: NoWait = False,
+) -> None:
+    """Rebuild the merged killmail layer from the per-source partitions; every day by
+    default."""
+    settings = _state(ctx).settings
+    run = _dispatch(
+        settings,
+        "killmails:merge",
+        {"from": _day(date_from), "to": _day(date_to)},
+        wait=not no_wait,
+    )
+    _print_run(run, objects="days merged")
+
+
+# --- zkillboard ---------------------------------------------------------------------------
+
+
+@zkillboard_app.command("status")
+def zkillboard_status(ctx: typer.Context) -> None:
+    """Show the zKillboard policy state: pause, refusals today, stop (design §11a)."""
+    settings = _state(ctx).settings
+    policy = load_zkillboard_policy(settings.zkillboard_policy_path)
+    now = datetime.now(UTC).timestamp()
+    print(f"stopped        {policy.stopped or 'no'}")
+    paused = policy.blocked_until - now
+    print(f"paused         {f'{paused:.0f}s' if paused > 0 else 'no'}")
+    today = datetime.now(UTC).date()
+    refusals = [r for r in policy.refusals if datetime.fromtimestamp(r, tz=UTC).date() == today]
+    print(f"refusals today {len(refusals)}")
+
+
+@zkillboard_app.command("resume")
+def zkillboard_resume(ctx: typer.Context) -> None:
+    """Clear a zKillboard stop and pause after reviewing why they happened."""
+    settings = _state(ctx).settings
+    policy = load_zkillboard_policy(settings.zkillboard_policy_path)
+    if not policy.stopped and policy.blocked_until <= datetime.now(UTC).timestamp():
+        print("zKillboard is not stopped or paused")
+        return
+    reason = policy.stopped or "pause"
+    policy.stopped = None
+    policy.blocked_until = 0
+    save_zkillboard_policy(settings.zkillboard_policy_path, policy)
+    print(f"cleared: {reason}")

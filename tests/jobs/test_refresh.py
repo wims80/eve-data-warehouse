@@ -15,7 +15,7 @@ from evedw.domain.schemas import (
     ATTACKERS,
     CHARACTERS,
     CORPORATIONS,
-    KILLMAILS,
+    MERGED_KILLMAILS,
 )
 from evedw.jobs.focus import FocusJob
 from evedw.jobs.refresh import CRAWL_STATE, CYCLE_STATE, RefreshJob, ids_from_killmails
@@ -138,10 +138,16 @@ def write_killmails(
                 "victim_character_id": victim,
                 "victim_corporation_id": 98000030,
                 "victim_alliance_id": 99000001,
+                "sources": ["everef"],
             },
-            {"source_date": day, "killmail_id": 2, "victim_corporation_id": 1000001},
+            {
+                "source_date": day,
+                "killmail_id": 2,
+                "victim_corporation_id": 1000001,
+                "sources": ["everef"],
+            },
         ],
-        schema=KILLMAILS,
+        schema=MERGED_KILLMAILS,
     )
     attackers = pa.Table.from_pylist(
         [
