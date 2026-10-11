@@ -306,10 +306,42 @@ no `zkb` metadata.
 Deliverables:
 
 - Design §1 amended: zKillboard's documented R2Z2 API is a source; scraping
-  zKillboard stays out. §2 gains the source's description and rules.
-- `sources/zkillboard.py`: R2Z2 client with our User-Agent and contact,
-  paced like EVE Ref, conditional GETs for `totals.json` and day files,
-  verified streaming downloads, 403 and 429 handled as in EVE Ref's client.
+  zKillboard stays out. §2 gains the source's description.
+- A zKillboard policy in design, binding for every request to zKillboard
+  including one-off scripts, as §11 is for ESI, and named in `CLAUDE.md`.
+  It follows zKillboard's API documentation
+  (https://zkillboard.com/api/docs/, checked 2026-10-11), which is checked
+  again before the client changes:
+  - "Send a descriptive `User-Agent` with a maintainer or project URL": the
+    project name, version, `EVEDW_ESI_CONTACT` and the repository URL.
+  - "Send `Accept-Encoding: gzip`" (or another compression the client
+    supports).
+  - "Cache responses locally and space repeated requests out": one request
+    in flight; daily history files at least `EVEDW_ZKILLBOARD_SPACING`
+    (default 5 s) apart, so the full history (6,885 files) takes about ten
+    hours and never runs as a burst; well under R2Z2's "up to 15 requests
+    per second per IP".
+  - History files have a one-day cache: `totals.json` and every day file
+    are conditional GETs against the stored validators, and a day is
+    downloaded again only when its `totals.json` count, ETag or
+    Last-Modified changed ("identify missing or changed daily files").
+    Discovery still reads `totals.json` in full on every sync.
+  - The compact `history/{YYYYMMDD}.json` id and hash index is used to see
+    which killmails changed before a day's raw file is fetched again
+    ("Use this compact index when rebuilding an archive").
+  - The live feed (M9): "Increment by one after each successful response",
+    about 100 ms between successes, "After a 404, wait at least six seconds
+    before trying again", consume promptly since files are kept "at least
+    24 hours", "Filter locally after retrieval", and expect "A reprocessed
+    killmail may appear again under a new sequence ID".
+  - A 403 or 429 stops every zKillboard request for an hour, logged at
+    warning level and shown in status; three in a day stop zKillboard work
+    until an operator resumes it, so the warehouse cannot keep pressing a
+    service that has asked it to stop.
+  - No polling of `/cache/bypass/healthcheck/` and no query strings on API
+    paths (filters go in the path, with the trailing slash).
+- `sources/zkillboard.py`: R2Z2 client implementing that policy, verified
+  streaming downloads, raw retained compressed.
 - Dataset `zkillboard_killmails`: discovery from `totals.json` plus each
   day file's headers, the generic sync loop (registry objects, revisions by
   sha256, raw retained, compressed), the existing killmail normaliser.
@@ -333,7 +365,8 @@ Deliverables:
 - Design §4, §5, §6, §7.1 and §12 amended; `docs/consumers.md` describes the
   merged tables and `sources`; tests against a fake R2Z2.
 
-Acceptance: the full zKillboard history is imported and retained; the
+Acceptance: the full zKillboard history is imported and retained without a
+403 or 429, at the policy's pace; the
 merged layer has no killmail id twice; 2026-07-13 is present; every day's
 merged count is at least the larger source count; the 2026-01-06
 duplicates are gone; `verify` reports the cross-source differences;
@@ -356,6 +389,7 @@ this feed, so it is collected from the live feed onward.
 
 Deliverables:
 
+- The zKillboard policy of M8 applies to every request of the follower.
 - A follower inside the service, an asyncio task beside the scheduler, not a
   queued job: from the stored `sequence_id` in `sweep_state`, or from
   `sequence.json` on first start or after more than 24 hours away (the daily
