@@ -140,7 +140,9 @@ class Scheduler:
         )
 
     def next_due(self) -> datetime | None:
-        return min((j.next_due for j in self.jobs), default=None)
+        """The earliest due time of an entry that is not running. A running entry's time
+        can be in the past; counting it would make ``run_forever`` spin (2026-10-11)."""
+        return min((j.next_due for j in self.jobs if j.label not in self._running), default=None)
 
     def start_due(self) -> list[asyncio.Task[None]]:
         """Start every due entry that is not already running, in due order, without waiting

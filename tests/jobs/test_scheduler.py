@@ -1,5 +1,6 @@
 """Interval scheduler: seeding from the run log, due ordering, rescheduling after runs."""
 
+import asyncio
 from datetime import UTC, datetime, timedelta
 
 import pytest
@@ -157,3 +158,24 @@ async def test_run_forever_sleeps_until_next_due(monkeypatch: pytest.MonkeyPatch
     with pytest.raises(StopAsyncIteration):
         await scheduler.run_forever()
     assert sleeps == [30.0, 30.0]
+
+
+async def test_a_running_entry_does_not_make_the_loop_spin() -> None:
+    clock = Clock()
+    gate = asyncio.Event()
+
+    async def submit(job: ScheduledJob) -> ImportRun | None:
+        await gate.wait()
+        return None
+
+    slice_ = ScheduledJob("entities:refresh", timedelta(minutes=1), next_due=T0)
+    later = ScheduledJob("entities:export", timedelta(days=1), next_due=T0 + timedelta(hours=1))
+    scheduler = Scheduler([slice_, later], submit, now=clock)
+    (task,) = scheduler.start_due()
+    await asyncio.sleep(0)
+    clock.now += timedelta(minutes=5)  # the slice runs long: its due time is now past
+    assert scheduler.due() == []
+    assert scheduler.next_due() == T0 + timedelta(hours=1)  # not the running slice's
+    gate.set()
+    await task
+    assert scheduler.next_due() == T0 + timedelta(minutes=6)
