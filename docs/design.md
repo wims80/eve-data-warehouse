@@ -598,7 +598,7 @@ the registry's `sweep_state`, so a restart resumes where the slice stopped.
    minute instead of 270. Nothing is skipped; they just stop holding up
    the live ones. A deferred entry fetches history only for a stored
    entity and details and history for one that is not stored. A live
-   character among the unknown ones is found earlier by M8's discovery,
+   character among the unknown ones is found earlier by M10's discovery,
    which queues it as a change.
    Within a class kinds take turns, so corporations never wait behind
    characters. A focus, change or active entry fetches details and history
@@ -622,7 +622,7 @@ corporation brings its known characters, and an alliance brings the
 corporations ESI lists for it now (one request) plus those stored with it,
 and their known characters. A settled entry is pulled forward, since a push
 keeps the lower priority. Characters the warehouse has never seen cannot be
-named this way; finding them is M8's discovery. The job is generic: it
+named this way; finding them is M10's discovery. The job is generic: it
 takes kinds and ids, never a report's notion of what it needs, and queries
 for a report live with the report (section 1).
 

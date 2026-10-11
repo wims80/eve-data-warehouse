@@ -1,8 +1,9 @@
 # Implementation plan
 
 Status: M0 to M5 complete (2026-10-07), M6 (entity coverage) complete
-(2026-10-09), M7 (gentler EVE Ref traffic) complete (2026-10-11). M8 (entity
-discovery and manual add) is next.
+(2026-10-09), M7 (gentler EVE Ref traffic) complete (2026-10-11). M8 (zKillboard
+as a second killmail source, one merged lake) is next, then M9 (live
+killmails) and M10 (entity discovery and manual add).
 
 Milestones are ordered so that each one leaves a working, testable system.
 Do not start a milestone before the previous one's acceptance checks pass.
@@ -278,9 +279,110 @@ Accepted 2026-10-11: 12 scheduled syncs from 2026-10-09 22:12 to 2026-10-11
 answered 304 except the current year and the totals; 28 to 36 HEADs a sync,
 more only when a year's listing changed. Numbers in design §6.
 
-## M8. Entity discovery and manual add
+## M8. zKillboard as a second killmail source, one merged killmail lake
 
-Not started. Starts once M7 is accepted.
+Not started. Planned 2026-10-11, ahead of entity discovery.
+
+EVE Ref's daily archives are the only killmail source, and they are not
+complete on their own. Comparing EVE Ref's per-day counts in the lake with
+zKillboard's R2Z2 history totals (checked 2026-10-11, 6,881 days to
+2026-10-06): 95,628,630 against 95,624,822 killmails, 6,431 days equal, 446
+days where zKillboard has more, 4 where EVE Ref has more. EVE Ref has no
+2026-07-13 at all (not listed, 404, totals 0; zKillboard has 15,746) and
+trails by 4 to 50 killmails a day on recent days until it republishes them;
+zKillboard's history lacks most of 2023-05-06 (1 against 17,240) and part of
+2023-05-08. EVE Ref's 2026-01-06 file also carries 14,042 killmails of
+2026-01-05 that are in that day's file too: 14,043 killmail ids sit in two
+day partitions of today's lake, so counts across days are inflated.
+
+zKillboard's documented R2Z2 API (`https://r2z2.zkillboard.com`, replacing
+RedisQ since 2026-05-31) publishes `/history/totals.json` (killmails per
+day) and `/history/raw/{YYYYMMDD}.json` (every killmail of a UTC day as a
+map from id to ESI killmail, about 37 MB a recent day, every day since
+2007-12-05; ETag and Last-Modified served). Rules: at most 15 requests a
+second per IP, a non-empty User-Agent. The history holds ESI killmails only,
+no `zkb` metadata.
+
+Deliverables:
+
+- Design §1 amended: zKillboard's documented R2Z2 API is a source; scraping
+  zKillboard stays out. §2 gains the source's description and rules.
+- `sources/zkillboard.py`: R2Z2 client with our User-Agent and contact,
+  paced like EVE Ref, conditional GETs for `totals.json` and day files,
+  verified streaming downloads, 403 and 429 handled as in EVE Ref's client.
+- Dataset `zkillboard_killmails`: discovery from `totals.json` plus each
+  day file's headers, the generic sync loop (registry objects, revisions by
+  sha256, raw retained, compressed), the existing killmail normaliser.
+  Every day, all of history, as the other datasets.
+- Two lake layers. Per source: `lake/sources/<source>/{killmails,attackers,
+  items}/` with one partition per upstream file, never read by consumers.
+  Merged: `lake/{killmails,attackers,items}/` with one partition per UTC day
+  of `killmail_time`, one row per `killmail_id`, a `sources` column naming
+  every source that had it; when both have a killmail the rows are the same
+  immutable ESI killmail and EVE Ref's copy is kept. A merge step rebuilds a
+  day, and the days either side of it (upstream files spill over, as on
+  2026-01-06), whenever a source partition for those days changes, through
+  `data.parquet.tmp` and `os.replace`; the registry records which source
+  revisions each merged day was built from.
+- Migration: today's EVE Ref partitions move under `lake/sources/everef/`
+  and the merged layer is built from them (and from zKillboard once
+  imported), from `raw/` without downloads.
+- `verify` compares per-day counts across both sources and the merged layer
+  and reports days missing from a source, duplicated ids, and days whose
+  merged count is below either source.
+- Design §4, §5, §6, §7.1 and §12 amended; `docs/consumers.md` describes the
+  merged tables and `sources`; tests against a fake R2Z2.
+
+Acceptance: the full zKillboard history is imported and retained; the
+merged layer has no killmail id twice; 2026-07-13 is present; every day's
+merged count is at least the larger source count; the 2026-01-06
+duplicates are gone; `verify` reports the cross-source differences;
+consumers read the merged tables unchanged in shape apart from `sources`.
+
+## M9. Live killmails from zKillboard
+
+Not started. Starts once M8 is accepted.
+
+R2Z2's live feed: `GET /ephemeral/sequence.json` gives the current sequence,
+`GET /ephemeral/{sequence}.json` one object, 404 when none is newer yet.
+Each object carries the full ESI killmail (`esi`), a `zkb` block
+(`totalValue`, `fittedValue`, `droppedValue`, `destroyedValue`,
+`totalDroppableValue`, `points`, `npc`, `solo`, `awox`, `attackerCount`,
+`locationID`, `labels`, `hash`), `sequence_id` and `uploaded_at` (checked
+2026-10-11). Rules: about 100 ms after a success, at least 6 s after a 404,
+at most 15 requests a second, objects kept at least 24 hours, reprocessed
+killmails reappear under a new sequence. zKillboard metadata exists only in
+this feed, so it is collected from the live feed onward.
+
+Deliverables:
+
+- A follower inside the service, an asyncio task beside the scheduler, not a
+  queued job: from the stored `sequence_id` in `sweep_state`, or from
+  `sequence.json` on first start or after more than 24 hours away (the daily
+  history covers any gap).
+- Raw: objects appended to `raw/zkillboard/live/<day>/` in hourly NDJSON
+  files, compressed when the hour closes, never modified after.
+- Live layer: killmails of days that neither source's daily file covers yet
+  go into the merged layer's day partition as rows with `sources = ['live']`,
+  rewritten every few minutes; when a daily file for that day arrives, the
+  merge step rebuilds the day from the daily sources and keeps live rows only
+  for killmails they still lack.
+- `killmail_zkb` dataset: one row per killmail from the `zkb` block plus
+  `sequence_id` and `uploaded_at`, partitioned by day under `lake/zkb/`,
+  newest sequence wins, kept for every day.
+- Entities: the recent-killmails step reads the live rows too, so new
+  characters on today's kills are queued the same day.
+- `evedw live status` (sequence, lag, killmails today, last error); `/health`
+  shows the follower. Tests against a fake R2Z2.
+
+Acceptance: killmails appear in the merged layer within a minute of
+zKillboard publishing them; a restart resumes from the stored sequence with
+no gap and no duplicate; a day's live rows give way to its daily files; a
+full day of following draws no 403 or 429.
+
+## M10. Entity discovery and manual add
+
+Not started. Starts once M9 is accepted.
 
 ESI cannot enumerate characters, so a character that never appears on a
 killmail or in a backfill archive stays unknown. eve-kill.com, whose
@@ -314,7 +416,7 @@ Deliverables:
   on 2026-10-08 by id, for the first consumer report: the `focus` queue
   class, `entities add <kind> <id>... [--members]` with members from our own
   tables and, for an alliance, ESI's corporation list. Names and eve-kill
-  members remain M8 work.
+  members remain M10 work.
 - `evedw entities add corporation <id-or-name>... [--members]`: details and
   alliance history at once; `--members` takes the member list from
   eve-kill and refreshes every member we did not have, plus the known
@@ -333,7 +435,7 @@ and without it.
 ## Consumers
 
 Not a milestone (decided 2026-10-09). Applications that read the warehouse
-live in their own repositories and need nothing from M7 or M8: they read the
+live in their own repositories and need no milestone to finish: they read the
 lake and the API, and steer the importer with generic jobs such as
 `entities:add`. They can start whenever the data they need is there; the
 first, a membership-origins report in `../eve-reports`, already runs. Kat's
