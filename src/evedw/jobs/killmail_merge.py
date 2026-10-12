@@ -9,6 +9,7 @@ several sources have a killmail, the first source in ``KILLMAIL_SOURCES`` suppli
 
 import json
 import logging
+import threading
 from collections.abc import Callable, Collection, Iterable
 from dataclasses import dataclass, field
 from datetime import UTC, date, datetime, timedelta
@@ -34,6 +35,10 @@ log = logging.getLogger(__name__)
 SPILL_DAYS = 1
 """Days either side of a merged day whose source files may hold its killmails. Measured
 2026-10-11: every misplaced killmail sat one day late (14,043 of them, two files)."""
+
+MERGE_LOCK = threading.Lock()
+"""Held while one merged day is read from its sources and written: the live follower and a
+sync in the archive lane can merge the same day, and the later write must see both."""
 
 _KILLMAIL_COLUMNS = ", ".join(n for n in KILLMAILS.names if n != "source_date")
 _ATTACKER_COLUMNS = ", ".join(n for n in ATTACKERS.names if n != "source_date")
@@ -161,33 +166,37 @@ class KillmailMerge:
         report = MergeReport()
         for day in sorted(days):
             cancel()
-            merged = merge_day(self.lake, day)
-            if merged is None:
-                if self.lake.partition("killmails", partition_name("killmails", day)) is None:
-                    continue
-                # Every source dropped the day: an empty partition, so no stale rows stay.
-                tables = {
-                    "killmails": MERGED_KILLMAILS.empty_table(),
-                    "attackers": ATTACKERS.empty_table(),
-                    "items": ITEMS.empty_table(),
-                }
-                built_from: list[dict[str, str]] = []
-            else:
-                tables, built_from = merged
-                existing = self.lake.partition("killmails", partition_name("killmails", day))
-                if tables["killmails"].num_rows == 0 and existing is None:
-                    continue  # a neighbour day with no killmail of its own
-            metadata = {
-                "evedw.layer": "merged",
-                "evedw.built_from": json.dumps(built_from, sort_keys=True),
-                "evedw.written_at": self.now().isoformat(),
-            }
-            name = partition_name("killmails", day)
-            # Same order as the importers: the killmails partition last.
-            for table in ("attackers", "items", "killmails"):
-                self.lake.write_partition(table, name, tables[table], metadata=metadata)
-            self._count(report, tables["killmails"])
+            with MERGE_LOCK:
+                self._merge_one(report, day)
         return report
+
+    def _merge_one(self, report: MergeReport, day: date) -> None:
+        merged = merge_day(self.lake, day)
+        if merged is None:
+            if self.lake.partition("killmails", partition_name("killmails", day)) is None:
+                return
+            # Every source dropped the day: an empty partition, so no stale rows stay.
+            tables = {
+                "killmails": MERGED_KILLMAILS.empty_table(),
+                "attackers": ATTACKERS.empty_table(),
+                "items": ITEMS.empty_table(),
+            }
+            built_from: list[dict[str, str]] = []
+        else:
+            tables, built_from = merged
+            existing = self.lake.partition("killmails", partition_name("killmails", day))
+            if tables["killmails"].num_rows == 0 and existing is None:
+                return  # a neighbour day with no killmail of its own
+        metadata = {
+            "evedw.layer": "merged",
+            "evedw.built_from": json.dumps(built_from, sort_keys=True),
+            "evedw.written_at": self.now().isoformat(),
+        }
+        name = partition_name("killmails", day)
+        # Same order as the importers: the killmails partition last.
+        for table in ("attackers", "items", "killmails"):
+            self.lake.write_partition(table, name, tables[table], metadata=metadata)
+        self._count(report, tables["killmails"])
 
     @staticmethod
     def _count(report: MergeReport, killmails: pa.Table) -> None:

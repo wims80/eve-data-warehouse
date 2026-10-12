@@ -8,6 +8,7 @@ shutdown. Routes live in ``evedw.service.routes``.
 import asyncio
 import contextlib
 import logging
+import threading
 from collections.abc import AsyncGenerator
 from contextlib import asynccontextmanager
 from datetime import UTC, datetime
@@ -18,9 +19,12 @@ from fastapi.responses import JSONResponse
 from evedw import __version__
 from evedw.config import Settings
 from evedw.jobs.catalog import JobCatalog, UnknownJobError
+from evedw.jobs.follower import LiveFollower
+from evedw.jobs.live_flush import LiveFlush
+from evedw.jobs.live_raw import LiveRaw
 from evedw.jobs.runner import WriterLock
 from evedw.jobs.scheduler import Scheduler, default_jobs
-from evedw.service.routes import datasets, health, jobs, lake, query, runs
+from evedw.service.routes import datasets, health, jobs, lake, live, query, runs
 from evedw.service.state import ServiceState
 from evedw.service.worker import JobWorker
 from evedw.store import open_entity_store, open_lake, open_queries, open_registry
@@ -32,8 +36,11 @@ class NotMigratedError(RuntimeError):
     pass
 
 
-def create_app(settings: Settings, *, schedule: bool = True) -> FastAPI:
-    """``schedule=False`` leaves the scheduler idle; tests trigger jobs explicitly."""
+def create_app(settings: Settings, *, schedule: bool = True, follow: bool | None = None) -> FastAPI:
+    """``schedule=False`` leaves the scheduler idle; tests trigger jobs explicitly. The live
+    feed is followed when ``EVEDW_ZKILLBOARD_LIVE`` is on and ``follow`` (by default
+    ``schedule``) allows it."""
+    follow_live = (schedule if follow is None else follow) and settings.zkillboard_live
 
     @asynccontextmanager
     async def lifespan(app: FastAPI) -> AsyncGenerator[None]:
@@ -60,6 +67,16 @@ def create_app(settings: Settings, *, schedule: bool = True) -> FastAPI:
             worker = JobWorker(catalog, registry, lock)
             scheduler = Scheduler(default_jobs(settings) if schedule else [], worker.run_scheduled)
             scheduler.seed(registry)
+            follower: LiveFollower | None = None
+            if follow_live:
+                raw = LiveRaw(settings.live_raw_dir)
+                follower = LiveFollower(
+                    client=catalog.zkillboard_client(),
+                    registry=registry,
+                    raw=raw,
+                    flush=LiveFlush(lake_store, raw, settings.scratch_dir / "live"),
+                    flush_interval=settings.live_flush_interval,
+                )
             app.state.warehouse = ServiceState(
                 settings=settings,
                 lock=lock,
@@ -70,14 +87,24 @@ def create_app(settings: Settings, *, schedule: bool = True) -> FastAPI:
                 catalog=catalog,
                 worker=worker,
                 scheduler=scheduler,
+                live=follower,
             )
             worker.start()
             ticker = asyncio.create_task(scheduler.run_forever(), name="evedw-scheduler")
+            stop_live = threading.Event()
+            following = (
+                asyncio.create_task(asyncio.to_thread(follower.run, stop_live), name="evedw-live")
+                if follower is not None
+                else None
+            )
             log.info("service ready at %s, data dir %s", settings.service_url, settings.data_dir)
             try:
                 yield
             finally:
                 log.info("service stopping")
+                stop_live.set()
+                if following is not None:
+                    await following
                 ticker.cancel()
                 with contextlib.suppress(asyncio.CancelledError):
                     await ticker
@@ -96,6 +123,7 @@ def create_app(settings: Settings, *, schedule: bool = True) -> FastAPI:
         redoc_url=None,
     )
     app.include_router(health.router)
+    app.include_router(live.router)
     app.include_router(datasets.router)
     app.include_router(jobs.router)
     app.include_router(runs.router)

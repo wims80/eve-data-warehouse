@@ -40,10 +40,12 @@ entities_app = typer.Typer(no_args_is_help=True, help="Character, corporation an
 esi_app = typer.Typer(no_args_is_help=True, help="ESI policy state.")
 killmails_app = typer.Typer(no_args_is_help=True, help="The merged killmail layer.")
 zkillboard_app = typer.Typer(no_args_is_help=True, help="zKillboard policy state.")
+live_app = typer.Typer(no_args_is_help=True, help="zKillboard's live feed.")
 app.add_typer(entities_app, name="entities")
 app.add_typer(esi_app, name="esi")
 app.add_typer(killmails_app, name="killmails")
 app.add_typer(zkillboard_app, name="zkillboard")
+app.add_typer(live_app, name="live")
 
 DATE_FORMATS = ["%Y-%m-%d"]
 
@@ -773,3 +775,33 @@ def zkillboard_resume(ctx: typer.Context) -> None:
     policy.blocked_until = 0
     save_zkillboard_policy(settings.zkillboard_policy_path, policy)
     print(f"cleared: {reason}")
+
+
+# --- live -------------------------------------------------------------------------------
+
+
+@live_app.command("status")
+def live_status(ctx: typer.Context) -> None:
+    """Show the live feed follower: sequence, lag, killmails today, last error."""
+    settings = _state(ctx).settings
+    with _service(settings) as service:
+        if service is None:
+            raise _fail("the live feed is followed by the service; it is not running")
+        live = service.live()
+    if not live.enabled:
+        print("live feed     not followed (EVEDW_ZKILLBOARD_LIVE is off)")
+        return
+
+    def when(value: datetime | None) -> str:
+        return value.strftime("%Y-%m-%d %H:%M:%S") if value is not None else "-"
+
+    lag = f"{live.lag_seconds:.0f}s" if live.lag_seconds is not None else "-"
+    print(f"state         {live.state}")
+    print(f"sequence      next {live.next_sequence or '-'}, pointer {live.pointer or '-'}")
+    print(f"last object   {when(live.last_object_at)} UTC, lag {lag}")
+    print(f"today         {live.objects_today} objects ({live.today or '-'})")
+    print(f"flushed       up to {live.flushed_sequence or '-'} at {when(live.last_flush_at)} UTC")
+    if live.skipped_sequences:
+        print(f"skipped       {live.skipped_sequences} sequences never published")
+    if live.last_error:
+        print(f"last error    {when(live.last_error_at)} UTC  {live.last_error}")

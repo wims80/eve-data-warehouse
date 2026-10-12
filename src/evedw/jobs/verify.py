@@ -13,6 +13,7 @@ from evedw.config import Settings
 from evedw.domain.datasets import Dataset
 from evedw.domain.registry import ObjectStatus
 from evedw.domain.schemas import (
+    DAILY_SOURCES,
     DATASET_TABLES,
     KILLMAIL_SOURCES,
     partition_date,
@@ -215,7 +216,7 @@ def verify_killmail_layers(
     lake: Lake, *, date_from: date | None = None, date_to: date | None = None
 ) -> VerifyReport:
     """Design §12: no killmail twice in the merged layer; each merged day holds at least
-    every source's distinct killmails of that day; days one source lacks, as notes."""
+    every source's distinct killmails of that day; days one daily source lacks, as notes."""
     report = VerifyReport(dataset=MERGED)
 
     def counts(table: str) -> dict[date, tuple[int, int]]:
@@ -251,8 +252,13 @@ def verify_killmail_layers(
                         f"{day}: merged has {have} killmails, {source} has {ids}",
                     )
                 )
-        present = {s: by_day[day][1] for s, by_day in sources.items() if day in by_day}
-        for source in KILLMAIL_SOURCES:
+        # The live feed covers only the days since it started; daily sources cover all.
+        present = {
+            s: by_day[day][1]
+            for s, by_day in sources.items()
+            if s in DAILY_SOURCES and day in by_day
+        }
+        for source in DAILY_SOURCES:
             if source not in present and present:
                 others = ", ".join(f"{s} has {n:,}" for s, n in present.items())
                 report.notes.append(

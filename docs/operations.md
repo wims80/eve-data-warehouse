@@ -362,6 +362,25 @@ serving the same older copy it imports that copy and the day shows under
 once the newer copy is served. Nothing needs doing by hand; `evedw verify`
 lists provisional days as notes.
 
+## Live killmails
+
+The service follows zKillboard's live feed while `EVEDW_ZKILLBOARD_LIVE` is
+on (the default), and writes what it fetched to the lake every
+`EVEDW_LIVE_FLUSH_INTERVAL` (30 s). It is not a job, so it is not in the run
+log:
+
+```
+evedw live status
+journalctl --user -u evedw -o cat | /usr/bin/grep -E "live (feed|flush)" | tail
+```
+
+A restart resumes from the stored sequence; after more than a day down it
+starts again at the feed's head, and the hourly zKillboard history sync fills
+the days in between. A zKillboard pause or stop (`evedw zkillboard status`)
+also holds the follower; it resumes on its own when the pause ends or after
+`evedw zkillboard resume`. The raw objects are under
+`data/raw/zkillboard/live/<day>/<hour>.ndjson.gz`.
+
 ## ESI downtime
 
 ESI work pauses every day around EVE's downtime at 11:00 UTC (design §11):

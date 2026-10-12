@@ -78,6 +78,8 @@ async def test_health_and_empty_listings(api: httpx.AsyncClient, settings: Setti
     assert (await api.get("/runs")).json() == {"runs": []}
     assert (await api.get("/lake")).json()["partitions"] == []
     assert (await api.get("/jobs")).json()["jobs"][0] == "sync:killmails"
+    assert (await api.get("/live")).json()["enabled"] is False  # tests follow no feed
+    assert health["live"]["enabled"] is False
     listed = (await api.get("/query")).json()
     assert listed["arrow_media_type"] == ARROW_STREAM
     assert {q["name"] for q in listed["queries"]} >= {"killmails_by_date", "alliances_by_id"}

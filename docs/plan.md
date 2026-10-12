@@ -3,7 +3,8 @@
 Status: M0 to M5 complete (2026-10-07), M6 (entity coverage) complete
 (2026-10-09), M7 (gentler EVE Ref traffic) complete (2026-10-11), M8 (zKillboard
 as a second killmail source, one merged lake) complete (2026-10-12). Next M9
-(live killmails), then M10 (entity discovery and manual add).
+(live killmails, code done, acceptance in progress), then M10 (entity
+discovery and manual add).
 
 Milestones are ordered so that each one leaves a working, testable system.
 Do not start a milestone before the previous one's acceptance checks pass.
@@ -393,7 +394,12 @@ keep their columns, with `sources` added to `killmails`.
 
 ## M9. Live killmails from zKillboard
 
-Not started.
+Code done 2026-10-12; live acceptance in progress. Settled while building it
+(design §7.1, §8, §11a): the follower is a thread the service starts, not a
+queued job, and flushes every 30 s itself; `live` is a third killmail
+source, last in precedence, so daily files take over by the existing merge;
+`killmail_zkb` lives under `lake/killmail_zkb/`; one process-wide gate keeps
+one zKillboard request in flight across the follower and the history syncs.
 
 R2Z2's live feed: `GET /ephemeral/sequence.json` gives the current sequence,
 `GET /ephemeral/{sequence}.json` one object, 404 when none is newer yet.

@@ -52,6 +52,10 @@ class Settings(BaseSettings):
     zkillboard_sync_max: int = 1000
     """Days one scheduled zKillboard sync imports at most, newest first (design §7.1)."""
     sync_interval_zkillboard: timedelta = Field(default=timedelta(hours=1))
+    zkillboard_live: bool = True
+    """Follow zKillboard's live feed inside the service (design §7.1)."""
+    live_flush_interval: timedelta = Field(default=timedelta(seconds=30))
+    """How often the follower writes newly fetched killmails to the lake."""
     esi_base_url: str = "https://esi.evetech.net"
 
     sync_interval_killmails: timedelta = Field(default=timedelta(hours=6))
@@ -104,6 +108,7 @@ class Settings(BaseSettings):
         "affiliation_cycle",
         "verify_interval",
         "esi_refresh_interval",
+        "live_flush_interval",
         mode="before",
     )
     @classmethod
@@ -160,6 +165,11 @@ class Settings(BaseSettings):
     def zkillboard_policy_path(self) -> Path:
         """zKillboard refusals and stop flag (design §11a)."""
         return self.data_dir / "zkillboard" / "policy.json"
+
+    @property
+    def live_raw_dir(self) -> Path:
+        """Hourly files of zKillboard's live feed (design §4)."""
+        return self.raw_dir / "zkillboard" / "live"
 
     @property
     def entities_dir(self) -> Path:

@@ -266,3 +266,29 @@ def test_esi_resume_edits_only_the_policy_file(data_dir: Path) -> None:
     assert "cleared stop: HTTP 420" in result.output
     assert json.loads(policy_path.read_text())["stopped"] is None
     assert not (data_dir / "warehouse.duckdb").exists()
+
+
+def test_live_status_reads_the_service(data_dir: Path, service: respx.Router) -> None:
+    service.get(f"{SERVICE}/live").mock(
+        return_value=httpx.Response(
+            200,
+            json={
+                "enabled": True,
+                "state": "following",
+                "next_sequence": 100003600,
+                "pointer": 100003583,
+                "last_object_at": "2026-10-12T20:30:00Z",
+                "last_uploaded_at": "2026-10-12T20:29:58Z",
+                "lag_seconds": 4.2,
+                "today": "2026-10-12",
+                "objects_today": 812,
+                "flushed_sequence": 100003590,
+                "last_flush_at": "2026-10-12T20:29:45Z",
+            },
+        )
+    )
+    result = runner.invoke(app, ["--data-dir", str(data_dir), "live", "status"])
+    assert result.exit_code == 0, result.output
+    assert "state         following" in result.output
+    assert "next 100003600, pointer 100003583" in result.output
+    assert "lag 4s" in result.output and "812 objects" in result.output

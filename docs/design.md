@@ -158,7 +158,16 @@ checked 2026-10-11):
 - `/history/{YYYYMMDD}.json`: the compact index of that day, killmail id to
   hash.
 - `/ephemeral/sequence.json` and `/ephemeral/{sequence}.json`: the live feed
-  (M9), each object an ESI killmail with its hash and a `zkb` block.
+  (M9). Sequence ids are global and strictly increasing; the pointer in
+  `sequence.json` moves every 51 killmails, so it can trail the newest
+  object; an object is kept at least 24 hours, and a reprocessed killmail
+  comes back under a new sequence. An object as served on 2026-10-12 has
+  `killmail_id`, `hash`, `sequence_id`, `uploaded_at` (epoch seconds), `esi`
+  (the ESI killmail) and `zkb` (`locationID`, `hash`, `fittedValue`,
+  `droppedValue`, `destroyedValue`, `totalValue`, `totalDroppableValue`,
+  `points`, `npc`, `solo`, `awox`, `labels`, `attackerCount`, `href`); the
+  documentation also names an optional `sequence_updated` marker. The `zkb`
+  metadata exists only on this feed.
 
 Compared with EVE Ref (2026-10-11, 6,881 days to 2026-10-06): 95,624,822
 killmails against 95,628,630, 6,431 days equal. zKillboard has more on 446
@@ -209,6 +218,7 @@ src/evedw/
   sources/
     everef.py          index.json discovery, totals, download with etag/size checks
     archives.py        tar.bz2 and csv.bz2 readers producing NDJSON/CSV scratch files
+    zkillboard.py      R2Z2 history and live feed under the policy of section 11a
     esi/
       client.py        httpx client, headers, compatibility date, conditional requests
       policy.py        pacing, error limits, Retry-After, budget; persisted as JSON
@@ -228,6 +238,10 @@ src/evedw/
     scheduler.py       asyncio interval scheduler
     sync.py            discover + fetch + import per dataset, newest first
     killmails.py       NDJSON -> normalised tables
+    killmail_merge.py  the merged killmail layer
+    follower.py        zKillboard live feed follower, run by the service (section 7.1)
+    live_raw.py        the feed's hourly raw files
+    live_flush.py      raw live objects -> the live source and killmail_zkb
     market.py          CSV -> table
     entities.py        seed from backfill, ESI refresh, Parquet export
     verify.py          counts, file integrity, registry consistency
@@ -237,7 +251,7 @@ src/evedw/
     worker.py          job worker: an esi and an archive lane, one run at a time each, cancel on stop
     models.py          response bodies, shared with the client
     client.py          HTTP client the CLI uses when a service holds the lock
-    routes/            health, datasets, jobs, runs, lake, query
+    routes/            health, live, datasets, jobs, runs, lake, query
   cli.py               typer entry point `evedw`
 tests/
   fixtures/            one small real day of each dataset, trimmed
@@ -257,6 +271,7 @@ data/
     market_history/2026/market-history-2026-10-01/<sha256>.csv.bz2
     entities_backfill/<year>/<name>/<sha256>.tar.bz2
     zkillboard_killmails/2026/20261001/<sha256>.json.gz, <sha256>.index.json.gz
+    zkillboard/live/2026-10-12/20.ndjson.gz           live feed objects fetched 20:00-20:59 UTC
   zkillboard/policy.json           zKillboard refusals and stop flag (section 11)
   lake/
     killmails/source_date=2026-10-01/data.parquet      merged: one row per killmail
@@ -264,6 +279,8 @@ data/
     items/source_date=2026-10-01/data.parquet
     sources/everef/{killmails,attackers,items}/source_date=2026-10-01/data.parquet
     sources/zkillboard/{killmails,attackers,items}/source_date=2026-10-01/data.parquet
+    sources/live/{killmails,attackers,items}/source_date=2026-10-12/data.parquet
+    killmail_zkb/source_date=2026-10-12/data.parquet  zKillboard metadata from the live feed
     LAYOUT                                             lake layout version (2)
     market_history/date=2026-10-01/data.parquet
     entities/characters.parquet, corporations.parquet, alliances.parquet,
@@ -339,6 +356,10 @@ operations, not SQL. Columns below are the logical model.
 | status | `new`, `changed`, `fetching`, `fetched`, `importing`, `imported`, `provisional`, `failed`, `gone`, `skipped` |
 | last_error | |
 | stale_etag, stale_runs | the etag downloads kept serving while discovery recorded another, and for how many consecutive syncs (section 6) |
+
+The live follower keeps its place in the state table (`sweep_state`):
+`zkillboard.live.sequence` holds the next sequence to fetch and when the last
+object came, `zkillboard.live.flushed` the last sequence written to the lake.
 
 `source_revision`, one row per fetched content hash of an object:
 
@@ -604,6 +625,40 @@ copies are 1 to 5 killmails short of `totals.json`. `verify` with hashing
 covers all datasets in about 7 minutes, most of it decompressing
 zKillboard's raw files.
 
+Live killmails (decided 2026-10-12, M9). A follower inside the service
+reads zKillboard's live feed one sequence at a time (section 11a) and appends
+every object, as served, to an hourly NDJSON file under
+`raw/zkillboard/live/<day>/`, gzip-compressed once its hour has closed and
+never modified after. It stores the next sequence after each object, so a
+restart resumes where it stopped and can fetch an object twice but never
+skip one; it starts from `sequence.json` the first time and after more than
+24 hours away, when the feed no longer holds what it missed and the daily
+history covers it. A 404 below the pointer in `sequence.json` (read at most
+once a minute while the feed answers 404) is a sequence zKillboard never
+published, and is skipped. Every `EVEDW_LIVE_FLUSH_INTERVAL` (30 s) the
+follower writes what it fetched since its last flush: the newest sequence of
+each killmail wins, and for each UTC day of `killmail_time` among them the
+day's `live` source partitions (`sources/live/`, the same three tables) and
+its `killmail_zkb` partition are rewritten with the new killmails in place of
+earlier copies. The merged layer is then rebuilt for those days. `live` is
+the last source in precedence, so a killmail a daily file has keeps that
+file's rows and `sources` names `live` as well; when a day's daily files
+arrive, the live rows remain only for killmails they still lack. A merged day
+is read and written under one lock, because the follower and a sync can
+merge the same day. The follower is not a queued job: a flush every 30 s
+would put about 2,900 runs a day into the run log. Live partitions are
+built from the raw files, so deleting them and the flushed checkpoint
+rebuilds them.
+
+`killmail_zkb`: `source_date` (the UTC day of `killmail_time`),
+`killmail_id, sequence_id, uploaded_at, killmail_hash, location_id,
+total_value, fitted_value, dropped_value, destroyed_value,
+total_droppable_value, points, npc, solo, awox, attacker_count, labels`, one
+row per killmail seen on the live feed, kept for every day. zKillboard
+revalues killmails it reprocesses; the newest sequence wins. `href` is not
+stored (ESI's URL, built from id and hash); other unknown keys are logged and
+recorded in the partition metadata, as for killmails.
+
 ### 7.2 Market history
 
 One table `market_history` partitioned by `date`: `date, region_id, type_id,
@@ -820,6 +875,7 @@ view per exported file.
 | `entities:seed` all | daily (`EVEDW_SEED_INTERVAL`) | import any listed backfill archive not yet seeded |
 | `entities:export` | daily | write entity Parquet snapshots |
 | `verify` | weekly | read-only consistency report |
+| live feed follower | continuous, not a job | follows zKillboard's live feed, flushes every 30 s (section 7.1) |
 
 The scheduler is a small asyncio loop owned by the service: each entry has a
 job name, parameters, an interval and a next-due time. Every run, scheduled
@@ -855,6 +911,12 @@ User-Agent; the service logs a warning instead. `entities:export` runs every
 `EVEDW_EXPORT_INTERVAL` (daily) and `verify` every `EVEDW_VERIFY_INTERVAL`
 (weekly) as a job: issues are logged and the run is recorded as failed with
 their count and kinds, so drift shows up in the run log.
+
+The live feed follower is a thread the service starts beside the scheduler
+when `EVEDW_ZKILLBOARD_LIVE` is on (default), and stops first on shutdown,
+after a last flush. It sends zKillboard requests through the same
+process-wide gate as the history syncs (section 11a) and writes the lake
+outside the job worker, under the service's writer lock.
 
 The scheduled syncs carry no date range, so the first service run on a data
 dir that was only partially synced from the CLI performs the full backfill,
@@ -912,7 +974,8 @@ Bound to `127.0.0.1:8470` by default. No authentication, local only.
 | `GET /lake?table=` | partition manifest: table, partition, path, row count, revision, source sha256, parser version, written_at |
 | `GET /query` | the named queries and their parameters |
 | `GET /query/{named}?params` | runs a named read query from `store/.../queries/`, returns an Arrow IPC stream when `Accept: application/vnd.apache.arrow.stream` (row count in `X-Row-Count`), else JSON `{name, row_count, columns, rows}` with rows as objects |
-| `GET /health` | lock held, free space, the current and queued runs, the schedule with next-due times, last run per job |
+| `GET /health` | lock held, free space, the current and queued runs, the schedule with next-due times, last run per job, the live follower |
+| `GET /live` | the live follower: state, next sequence, pointer, last object and lag, objects today, last flush, skipped sequences, last error (`evedw live status`) |
 
 Named queries are deliberately few: by-date-range reads of each table and
 entity lookups by ID. Analytical queries belong in consumers reading Parquet.
@@ -1065,6 +1128,9 @@ again before the client changes:
 - "Send a descriptive `User-Agent` with a maintainer or project URL": the
   project name and version, `EVEDW_ESI_CONTACT` and the repository URL.
 - "Send `Accept-Encoding: gzip`": the client asks for gzip.
+- One request in flight holds across the process: every zKillboard client
+  the service builds, the live follower's included, shares one gate that
+  admits one request at a time and spaces starts (decided 2026-10-12, M9).
 - "Cache responses locally and space repeated requests out": one request in
   flight; requests start at least `EVEDW_ZKILLBOARD_SPACING` (0.2 s) apart
   and daily history files at least `EVEDW_ZKILLBOARD_DOWNLOAD_SPACING`
@@ -1076,10 +1142,17 @@ again before the client changes:
   day is downloaded again only when its count or its file's headers
   changed ("identify missing or changed daily files"), and each day's
   compact index is fetched with the day file it belongs to.
-- The live feed (M9): "Increment by one after each successful response",
-  about 100 ms between successes, "After a 404, wait at least six seconds
-  before trying again"; files are kept "at least 24 hours"; "A reprocessed
-  killmail may appear again under a new sequence ID".
+- The live feed (M9, checked again 2026-10-12): "Increment by one after
+  each successful response", 100 ms after a success (and the gate's
+  spacing), "After a 404, wait at least six seconds before trying again"
+  (6 s); files are kept "at least 24 hours"; "A reprocessed killmail may
+  appear again under a new sequence ID"; "The pointer updates every 51
+  killmails". `sequence.json` is read at start and at most once a minute
+  while the feed answers 404. A paused or stopped zKillboard leaves the
+  follower waiting, checking the local policy file once a minute, with no
+  request sent. At the gate's 5 requests a second the follower drains a
+  backlog far faster than zKillboard's typical rate of about one killmail
+  every few seconds.
 - A 403 or 429 is not retried: every zKillboard request stops for an hour,
   logged at warning level and shown by `evedw zkillboard status`; the third
   in a UTC day stops zKillboard work until an operator runs `evedw
@@ -1105,7 +1178,9 @@ again before the client changes:
 - Killmails across sources (section 7.1): no `killmail_id` twice in the
   merged layer; per UTC day of `killmail_time`, the merged count at least
   each source's count of distinct killmails of that day; days a source
-  lacks while the other has killmails, listed per source.
+  lacks while the other has killmails, listed per source. The live feed
+  counts in the "at least each source" check but never as lacking a day:
+  it covers only the days since it started.
 
 Output is a text table or JSON. It never writes.
 
@@ -1125,7 +1200,8 @@ Keys: `DATA_DIR`, `BIND`, `MIN_FREE_GB`, `ESI_CONTACT`, `ESI_DAILY_BUDGET`, `ESI
 `EXPORT_INTERVAL`, `SEED_INTERVAL`, `ALLIANCE_SWEEP_INTERVAL`,
 `AFFILIATION_CYCLE`, `VERIFY_INTERVAL`, `HEAD_DAYS`, `LOG_LEVEL`,
 `ZKILLBOARD_BASE_URL`, `ZKILLBOARD_SPACING`, `ZKILLBOARD_DOWNLOAD_SPACING`,
-`ZKILLBOARD_SYNC_MAX`, `SYNC_INTERVAL_ZKILLBOARD`.
+`ZKILLBOARD_SYNC_MAX`, `SYNC_INTERVAL_ZKILLBOARD`, `ZKILLBOARD_LIVE`,
+`LIVE_FLUSH_INTERVAL`.
 Intervals are seconds in the environment. Base URLs are overridable so tests
 can point at a local fixture server. `HEAD_DAYS` defaults to 30 (section 6).
 

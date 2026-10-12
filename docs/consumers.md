@@ -58,6 +58,21 @@ of those gaps or repeats. `killmails_unique` is gone, `killmails` already has
 one row per killmail. The per-source tables under `lake/sources/` are the
 warehouse's own bookkeeping; do not read them.
 
+Killmails also arrive live from zKillboard's feed, usually within a minute
+of zKillboard publishing them; their `sources` include `live`. Today's and
+yesterday's partitions are therefore rewritten every 30 seconds or so, each
+time atomically, so a reader sees either the old or the new day, never a
+partial one. When a day's daily files arrive, their rows replace the live
+ones and the day settles; `live` stays in `sources` for killmails the feed
+also brought.
+
+`killmail_zkb` holds zKillboard's metadata (ISK values, points, `npc`,
+`solo`, `awox`, `labels`, `location_id`) for every killmail seen on the live
+feed, one row per killmail, partitioned like `killmails` by the day of
+`killmail_time`. It starts on the day the feed was first followed
+(2026-10-12); zKillboard publishes this metadata nowhere else, so older
+killmails have none. Join on `killmail_id`. `evedw views` includes it.
+
 ## Incremental pulls over the API
 
 A consumer that keeps its own copy asks which objects changed since its last

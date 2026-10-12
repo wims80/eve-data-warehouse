@@ -1,12 +1,13 @@
 """``GET /health``: lock state, free space, current and queued runs, schedule."""
 
 import shutil
+from datetime import UTC, datetime
 
 from fastapi import APIRouter, Request
 
 from evedw import __version__
 from evedw.jobs.catalog import JOB_NAMES
-from evedw.service.models import HealthOut, RunOut, ScheduleOut
+from evedw.service.models import HealthOut, LiveOut, RunOut, ScheduleOut
 from evedw.service.state import state_of
 
 router = APIRouter(tags=["health"])
@@ -47,4 +48,7 @@ def health(request: Request) -> HealthOut:
             for entry in state.scheduler.snapshot()
         ],
         last_runs=last_runs,
+        live=LiveOut.from_status(
+            state.live.status if state.live is not None else None, now=datetime.now(UTC)
+        ),
     )

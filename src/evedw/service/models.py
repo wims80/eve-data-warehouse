@@ -15,6 +15,7 @@ from evedw.domain.registry import (
     SourceRevision,
     Trigger,
 )
+from evedw.jobs.follower import LiveStatus
 from evedw.store.base import PartitionInfo, QueryInfo
 
 
@@ -227,6 +228,37 @@ class ScheduleOut(BaseModel):
     last_run: RunOut | None
 
 
+class LiveOut(BaseModel):
+    """The live feed follower (design §7.1)."""
+
+    enabled: bool
+    state: str | None = None
+    next_sequence: int | None = None
+    pointer: int | None = None
+    last_object_at: datetime | None = None
+    last_uploaded_at: datetime | None = None
+    lag_seconds: float | None = None
+    """Seconds between now and the upload time of the last object fetched."""
+    today: date | None = None
+    objects_today: int = 0
+    flushed_sequence: int | None = None
+    last_flush_at: datetime | None = None
+    skipped_sequences: int = 0
+    last_error: str | None = None
+    last_error_at: datetime | None = None
+
+    @classmethod
+    def from_status(cls, status: LiveStatus | None, *, now: datetime) -> "LiveOut":
+        if status is None:
+            return cls(enabled=False)
+        lag = (
+            (now - status.last_uploaded_at).total_seconds()
+            if status.last_uploaded_at is not None
+            else None
+        )
+        return cls(enabled=True, lag_seconds=lag, **status.to_dict())
+
+
 class HealthOut(BaseModel):
     ok: bool
     version: str
@@ -243,6 +275,7 @@ class HealthOut(BaseModel):
     schedule: list[ScheduleOut]
     last_runs: dict[str, RunOut]
     """Most recent run per job name."""
+    live: LiveOut | None = None
 
 
 class QueryParamOut(BaseModel):

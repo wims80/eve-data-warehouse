@@ -14,8 +14,10 @@ import hashlib
 import json
 import logging
 import os
+import threading
 import time
-from collections.abc import Callable, Iterable
+from collections.abc import Callable, Generator, Iterable
+from contextlib import AbstractContextManager, contextmanager
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
@@ -45,6 +47,31 @@ REFUSED = frozenset({403, 429})
 PAUSE_SECONDS = 3600
 STOP_AFTER = 3
 """Refusals in one UTC day that stop zKillboard work until an operator resumes it."""
+
+
+class ZKillboardGate:
+    """One zKillboard request in flight, and request starts at least ``spacing`` apart, for
+    every client that shares the gate (design §11a). The service's history syncs and its
+    live follower share ``PROCESS_GATE``; a client built without a gate gets its own."""
+
+    def __init__(self) -> None:
+        self._lock = threading.Lock()
+        self._next_start = 0.0
+
+    @contextmanager
+    def turn(
+        self, spacing: float, clock: Callable[[], float], sleep: Callable[[float], None]
+    ) -> Generator[None]:
+        with self._lock:
+            now = clock()
+            start = max(now, self._next_start)
+            if start > now:
+                sleep(start - now)
+            self._next_start = start + spacing
+            yield
+
+
+PROCESS_GATE = ZKillboardGate()
 
 
 class ZKillboardRefused(RuntimeError):
@@ -130,6 +157,7 @@ class ZKillboardClient(EveRefClient):
         sleep: Callable[[float], None] = time.sleep,
         clock: Callable[[], float] = time.monotonic,
         wall_clock: Callable[[], float] = time.time,
+        gate: ZKillboardGate | None = None,
     ) -> None:
         super().__init__(
             base_url,
@@ -153,6 +181,7 @@ class ZKillboardClient(EveRefClient):
         self._download_spacing = download_spacing
         self._next_download = 0.0
         self._wall_clock = wall_clock
+        self._gate = gate or ZKillboardGate()
 
     # -- policy --------------------------------------------------------------------------
 
@@ -178,8 +207,11 @@ class ZKillboardClient(EveRefClient):
         return ZKillboardRefused(f"{url}: HTTP {status}")
 
     def _pace(self) -> None:
+        """The policy check; spacing and the one request in flight are the gate's turn."""
         self._check_policy()
-        super()._pace()
+
+    def _turn(self) -> AbstractContextManager[None]:
+        return self._gate.turn(self._spacing, self._clock, self._sleep)
 
     def refresh_headers(
         self,
@@ -231,6 +263,32 @@ class ZKillboardClient(EveRefClient):
             return {}
         fetched = self._listing(dataset.totals_url(self.base_url))
         return {} if fetched is None else _counts(fetched[0])
+
+    # -- live feed -----------------------------------------------------------------------
+
+    def live_sequence(self) -> int:
+        """The live feed's pointer from ``ephemeral/sequence.json``. zKillboard moves it
+        every 51 killmails, so it can trail the newest object by that much."""
+        url = f"{self.base_url}/ephemeral/sequence.json"
+        response = self._request("GET", url, count="listings")
+        if response is None:
+            raise DownloadError(f"{url}: HTTP 404")
+        payload: dict[str, Any] = response.json()
+        sequence = payload.get("sequence")
+        if not isinstance(sequence, int) or isinstance(sequence, bool):
+            raise DownloadError(f"{url}: no sequence in {response.text[:200]!r}")
+        return sequence
+
+    def live_object(self, sequence: int) -> dict[str, Any] | None:
+        """The live object with this sequence, or ``None`` while there is none yet (404)."""
+        url = f"{self.base_url}/ephemeral/{sequence}.json"
+        response = self._request("GET", url, count="downloads")
+        if response is None:
+            return None
+        payload: Any = response.json()
+        if not isinstance(payload, dict):
+            raise DownloadError(f"{url}: expected a JSON object")
+        return dict(payload)  # pyright: ignore[reportUnknownArgumentType]
 
     # -- download ------------------------------------------------------------------------
 
@@ -284,7 +342,7 @@ class ZKillboardClient(EveRefClient):
             digest = hashlib.sha256()
             written = 0
             try:
-                with self._client.stream("GET", url) as response:
+                with self._turn(), self._client.stream("GET", url) as response:
                     if response.status_code in REFUSED:
                         raise self._refused(url, response.status_code)
                     if response.status_code in RETRY_STATUS:
@@ -336,7 +394,8 @@ class ZKillboardClient(EveRefClient):
                 if count is not None:
                     self._count(**{count: 1})
                 self._pace()
-                response = self._client.request(method, url, headers=headers)
+                with self._turn():
+                    response = self._client.request(method, url, headers=headers)
                 if response.status_code in REFUSED:
                     raise self._refused(url, response.status_code)
                 if response.status_code == 404:

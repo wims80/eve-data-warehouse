@@ -1,0 +1,105 @@
+{
+ "esi": {
+  "attackers": [
+   {
+    "alliance_id": 99009927,
+    "character_id": 92971989,
+    "corporation_id": 98783538,
+    "damage_done": 3920,
+    "final_blow": false,
+    "security_status": -6.2,
+    "ship_type_id": 17738,
+    "weapon_type_id": 17738
+   },
+   {
+    "alliance_id": 99009927,
+    "character_id": 96616254,
+    "corporation_id": 2014367342,
+    "damage_done": 3100,
+    "final_blow": false,
+    "security_status": -6.8,
+    "ship_type_id": 17738,
+    "weapon_type_id": 17738
+   },
+   {
+    "alliance_id": 99009927,
+    "character_id": 2123501229,
+    "corporation_id": 98798876,
+    "damage_done": 2884,
+    "final_blow": false,
+    "security_status": -7.1,
+    "ship_type_id": 17738,
+    "weapon_type_id": 17738
+   }
+  ],
+  "killmail_id": 139119508,
+  "killmail_time": "2026-10-12T20:24:29Z",
+  "solar_system_id": 30005189,
+  "victim": {
+   "alliance_id": 99007203,
+   "character_id": 94936656,
+   "corporation_id": 98630790,
+   "damage_taken": 68331,
+   "items": [
+    {
+     "flag": 31,
+     "item_type_id": 27391,
+     "quantity_dropped": 25,
+     "singleton": 0
+    },
+    {
+     "flag": 5,
+     "item_type_id": 27423,
+     "quantity_destroyed": 1000,
+     "singleton": 0
+    },
+    {
+     "flag": 19,
+     "item_type_id": 12068,
+     "quantity_dropped": 1,
+     "singleton": 0
+    },
+    {
+     "flag": 11,
+     "item_type_id": 2048,
+     "quantity_dropped": 1,
+     "singleton": 0
+    }
+   ],
+   "position": {
+    "x": -1220250268943.5862,
+    "y": 237133299590.3608,
+    "z": 626361970413.3978
+   },
+   "ship_type_id": 644
+  }
+ },
+ "hash": "f82124ec132de10b1b32155224f6c69ef4ba7ac9",
+ "killmail_id": 139119508,
+ "sequence_id": 100003578,
+ "uploaded_at": 1791836876,
+ "zkb": {
+  "attackerCount": 39,
+  "awox": false,
+  "destroyedValue": 180930405.98,
+  "droppedValue": 47674167.23,
+  "fittedValue": 207914841.67,
+  "hash": "f82124ec132de10b1b32155224f6c69ef4ba7ac9",
+  "href": "https://esi.evetech.net/killmails/139119508/f82124ec132de10b1b32155224f6c69ef4ba7ac9/",
+  "labels": [
+   "tz:eu",
+   "cat:6",
+   "#:25+",
+   "pvp",
+   "loc:nullsec",
+   "isk:under1b",
+   "capinv"
+  ],
+  "locationID": 50014206,
+  "npc": false,
+  "points": 1,
+  "solo": false,
+  "totalDroppableValue": 56901540.39,
+  "totalValue": 228604573.21
+ }
+}

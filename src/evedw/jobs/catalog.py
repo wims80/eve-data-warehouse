@@ -29,7 +29,7 @@ from evedw.jobs.sync import SyncJob
 from evedw.jobs.verify import VerifyJob
 from evedw.sources.esi import EsiClient
 from evedw.sources.everef import EveRefClient
-from evedw.sources.zkillboard import ZKillboardClient
+from evedw.sources.zkillboard import PROCESS_GATE, ZKillboardClient
 from evedw.store import open_response_cache
 from evedw.store.base import EntityStore, Lake, Registry
 
@@ -207,10 +207,11 @@ class JobCatalog:
             )
 
     def _client_for(self, dataset: Dataset) -> EveRefClient:
-        return self._zkillboard() if dataset.source == "zkillboard" else self._everef()
+        return self.zkillboard_client() if dataset.source == "zkillboard" else self._everef()
 
-    def _zkillboard(self) -> ZKillboardClient:
-        """Under the zKillboard policy of design §11a."""
+    def zkillboard_client(self) -> ZKillboardClient:
+        """Under the zKillboard policy of design §11a, sharing the process's gate with
+        every other zKillboard client, the live follower's included."""
         return ZKillboardClient(
             self.settings.zkillboard_base_url,
             policy_path=self.settings.zkillboard_policy_path,
@@ -218,6 +219,7 @@ class JobCatalog:
             cache=open_response_cache(self.settings),
             spacing=self.settings.zkillboard_spacing,
             download_spacing=self.settings.zkillboard_download_spacing,
+            gate=PROCESS_GATE,
         )
 
     def _everef(self) -> EveRefClient:

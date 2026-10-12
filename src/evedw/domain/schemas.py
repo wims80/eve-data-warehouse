@@ -151,9 +151,37 @@ MERGED_KILLMAILS = KILLMAILS.append(pa.field("sources", pa.list_(pa.string())))
 """The merged killmail table: one row per killmail, ``sources`` naming every source that
 has it (design §7.1)."""
 
-KILLMAIL_SOURCES: tuple[str, ...] = ("everef", "zkillboard")
+KILLMAIL_SOURCES: tuple[str, ...] = ("everef", "zkillboard", "live")
 """Killmail sources in order of precedence: where several have a killmail, the first one's
-rows go into the merged layer."""
+rows go into the merged layer. ``live`` is zKillboard's live feed (design §7.1), last so a
+day's daily files take over from it."""
+
+DAILY_SOURCES: tuple[str, ...] = ("everef", "zkillboard")
+"""Sources that publish whole days; ``verify`` compares their day counts."""
+
+KILLMAIL_ZKB = pa.schema(
+    [
+        ("source_date", pa.date32()),
+        ("killmail_id", pa.int64()),
+        ("sequence_id", pa.int64()),
+        ("uploaded_at", TIMESTAMP),
+        ("killmail_hash", pa.string()),
+        ("location_id", pa.int64()),
+        ("total_value", pa.float64()),
+        ("fitted_value", pa.float64()),
+        ("dropped_value", pa.float64()),
+        ("destroyed_value", pa.float64()),
+        ("total_droppable_value", pa.float64()),
+        ("points", pa.int64()),
+        ("npc", pa.bool_()),
+        ("solo", pa.bool_()),
+        ("awox", pa.bool_()),
+        ("attacker_count", pa.int32()),
+        ("labels", pa.list_(pa.string())),
+    ]
+)
+"""zKillboard's metadata of a killmail from the live feed, one row per killmail, the day
+from its ``killmail_time``; the newest sequence wins (design §7.1)."""
 
 KILLMAIL_TABLES: tuple[str, ...] = ("killmails", "attackers", "items")
 
@@ -169,6 +197,7 @@ LAKE_TABLES: dict[str, pa.Schema] = {
     "attackers": ATTACKERS,
     "items": ITEMS,
     "market_history": MARKET_HISTORY,
+    "killmail_zkb": KILLMAIL_ZKB,
 }
 """The tables consumers read."""
 
@@ -214,6 +243,7 @@ PARTITION_COLUMN: dict[str, str] = {
     "attackers": "source_date",
     "items": "source_date",
     "market_history": "date",
+    "killmail_zkb": "source_date",
     **dict.fromkeys(SOURCE_TABLES, "source_date"),
 }
 

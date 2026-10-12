@@ -7,6 +7,7 @@ from fastapi import Request
 
 from evedw.config import Settings
 from evedw.jobs.catalog import JobCatalog
+from evedw.jobs.follower import LiveFollower
 from evedw.jobs.runner import WriterLock
 from evedw.jobs.scheduler import Scheduler
 from evedw.service.worker import JobWorker
@@ -24,6 +25,8 @@ class ServiceState:
     catalog: JobCatalog
     worker: JobWorker
     scheduler: Scheduler
+    live: LiveFollower | None = None
+    """The live feed follower, when the service follows zKillboard's feed (design §7.1)."""
 
 
 def state_of(request: Request) -> ServiceState:

@@ -11,7 +11,7 @@ from evedw.config import Settings
 from evedw.domain.ids import RunId
 from evedw.domain.registry import DatasetSummary, ImportRun
 from evedw.jobs.runner import WriterLock
-from evedw.service.models import DatasetsOut, HealthOut, RunOut, RunsOut, TriggerOut
+from evedw.service.models import DatasetsOut, HealthOut, LiveOut, RunOut, RunsOut, TriggerOut
 
 
 class ServiceError(RuntimeError):
@@ -50,6 +50,9 @@ class ServiceClient:
 
     def health(self) -> HealthOut:
         return HealthOut.model_validate(self._request("GET", "/health"))
+
+    def live(self) -> LiveOut:
+        return LiveOut.model_validate(self._request("GET", "/live"))
 
     def datasets(self) -> tuple[list[DatasetSummary], dict[str, int]]:
         out = DatasetsOut.model_validate(self._request("GET", "/datasets"))
