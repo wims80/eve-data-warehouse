@@ -34,6 +34,9 @@ class Dataset:
     """``strptime`` format of the date captured from an object's file name."""
     source: str = "everef"
     """Upstream the dataset comes from: ``everef`` or ``zkillboard``."""
+    raw_gzipped: bool = False
+    """Raw files are stored gzip-compressed by the warehouse; their sha256 is that of the
+    file as served, so it is checked against the decompressed bytes."""
 
     def unsupported_reason(self, object_key: str) -> str | None:
         name = object_key.rpartition("/")[2]
@@ -122,6 +125,7 @@ ZKILLBOARD_KILLMAILS = Dataset(
     object_name_pattern=re.compile(r"^(?P<date>\d{8})\.json$"),
     date_format="%Y%m%d",
     source="zkillboard",
+    raw_gzipped=True,
 )
 """zKillboard's R2Z2 daily history (design §2.4): one ``history/raw/YYYYMMDD.json`` per UTC
 day, discovered from ``history/totals.json``."""

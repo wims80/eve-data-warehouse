@@ -48,6 +48,11 @@ drew 429s from EVE Ref's Cloudflare front around the 55th (2026-10-09)."""
 class UpstreamChangedError(RuntimeError):
     """The served file does not match what the index described. Re-discover the object."""
 
+    def __init__(self, message: str, *, served_etag: str | None = None) -> None:
+        super().__init__(message)
+        self.served_etag = served_etag
+        """The etag the download served, when that is what disagreed."""
+
 
 class DownloadError(RuntimeError):
     """A download failed after all attempts."""
@@ -222,6 +227,9 @@ def parse_html_listing(html: str, base_url: str) -> list[IndexEntry]:
 
 
 class EveRefClient:
+    source_name = "EVE Ref"
+    """Names the source in the sync's traffic log line."""
+
     def __init__(
         self,
         base_url: str,
@@ -493,7 +501,8 @@ class EveRefClient:
             served_etag = normalize_etag(response.headers.get("ETag"))
             if expected_etag and served_etag and served_etag != expected_etag:
                 raise UpstreamChangedError(
-                    f"{url}: served etag {served_etag} differs from index etag {expected_etag}"
+                    f"{url}: served etag {served_etag} differs from index etag {expected_etag}",
+                    served_etag=served_etag,
                 )
             content_length = response.headers.get("Content-Length")
             declared = int(content_length) if content_length and content_length.isdigit() else None

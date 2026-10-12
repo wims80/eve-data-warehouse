@@ -19,10 +19,19 @@ class ObjectStatus(StrEnum):
     GONE = "gone"
     SKIPPED = "skipped"
     """Listed upstream, deliberately not imported: the dataset marks it unsupported."""
+    PROVISIONAL = "provisional"
+    """Imported from the older copy upstream's download still serves while its headers
+    announce a newer one; checked again on every sync (design §6)."""
 
 
 PENDING_STATUSES: frozenset[ObjectStatus] = frozenset(
-    {ObjectStatus.NEW, ObjectStatus.CHANGED, ObjectStatus.FETCHED, ObjectStatus.FAILED}
+    {
+        ObjectStatus.NEW,
+        ObjectStatus.CHANGED,
+        ObjectStatus.FETCHED,
+        ObjectStatus.FAILED,
+        ObjectStatus.PROVISIONAL,
+    }
 )
 """Statuses a sync run should pick up and work on."""
 
@@ -103,6 +112,10 @@ class SourceObject:
     current_revision: int | None
     status: ObjectStatus
     last_error: str | None
+    stale_etag: str | None = None
+    """The etag downloads kept serving while discovery recorded another one."""
+    stale_runs: int = 0
+    """Consecutive syncs whose download served ``stale_etag``."""
 
     def differs_from(self, seen: DiscoveredObject) -> bool:
         return (

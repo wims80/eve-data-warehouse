@@ -30,16 +30,16 @@ def test_status_before_migrate(data_dir: Path) -> None:
 def test_migrate_then_status(data_dir: Path) -> None:
     result = runner.invoke(app, ["--data-dir", str(data_dir), "migrate"])
     assert result.exit_code == 0, result.output
-    assert "upgraded from version 0 to 3" in result.output
+    assert "upgraded from version 0 to 4" in result.output
     assert (data_dir / "warehouse.duckdb").exists()
 
     result = runner.invoke(app, ["--data-dir", str(data_dir), "migrate"])
     assert result.exit_code == 0
-    assert "current at version 3" in result.output
+    assert "current at version 4" in result.output
 
     result = runner.invoke(app, ["--data-dir", str(data_dir), "status"])
     assert result.exit_code == 0, result.output
-    assert "schema        version 3" in result.output
+    assert "schema        version 4" in result.output
     assert "killmails" in result.output
     assert "market_history" in result.output
     assert "no runs recorded" in result.output
@@ -200,7 +200,9 @@ def test_status_and_verify_use_the_service(data_dir: Path, service: respx.Router
     result = runner.invoke(app, ["--data-dir", str(data_dir), "status"])
     assert result.exit_code == 0, result.output
     assert f"service       {SERVICE}" in result.output
-    assert re.search(r"market_history\s+1\s+34\s+2\s+0\s+2026-09-01 \.\. 2026-10-04", result.output)
+    assert re.search(
+        r"market_history\s+1\s+34\s+0\s+2\s+0\s+2026-09-01 \.\. 2026-10-04", result.output
+    )
     assert "sync:market_history      manual   succeeded  objects=3 rows=600" in result.output
 
     result = runner.invoke(app, ["--data-dir", str(data_dir), "entities", "status"])

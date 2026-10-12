@@ -322,6 +322,7 @@ its traffic:
 
 ```
 journalctl --user -u evedw -o cat | /usr/bin/grep "EVE Ref traffic" | tail
+journalctl --user -u evedw -o cat | /usr/bin/grep "zKillboard traffic" | tail
 ```
 
 Requests start at least `EVEDW_EVEREF_SPACING` (0.5 s) apart, two in
@@ -352,6 +353,14 @@ evedw zkillboard resume      # after finding out why
 
 `evedw verify` checks the merged layer against both sources and lists the
 days one source lacks as notes.
+
+zKillboard's CDN sometimes keeps serving an older copy of a day file after
+`totals.json` and HEAD announce a newer one. The sync defers such a day
+(`rewritten upstream during the sync` in the journal); after three syncs
+serving the same older copy it imports that copy and the day shows under
+`provisional` in `evedw status`. Every sync checks it again and replaces it
+once the newer copy is served. Nothing needs doing by hand; `evedw verify`
+lists provisional days as notes.
 
 ## ESI downtime
 

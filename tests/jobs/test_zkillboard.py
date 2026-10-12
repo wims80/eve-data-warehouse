@@ -11,11 +11,11 @@ import pytest
 import respx
 
 from evedw.domain.datasets import KILLMAILS, ZKILLBOARD_KILLMAILS
-from evedw.domain.registry import RunStatus, Trigger
+from evedw.domain.registry import ObjectStatus, RunStatus, Trigger
 from evedw.jobs.importers import importer_for
 from evedw.jobs.runner import JobRunner
 from evedw.jobs.sync import SyncJob
-from evedw.jobs.verify import verify_killmail_layers
+from evedw.jobs.verify import verify_dataset, verify_killmail_layers
 from evedw.sources.zkillboard import ZKillboardClient, ZKillboardRefused, load_policy
 from tests.fake_esi import MemoryCache
 from tests.helpers import TODAY, FakeEveRef, SyncEnv, killmail_name, md5
@@ -34,6 +34,9 @@ class FakeR2Z2:
         self.hits: Counter[str] = Counter()
         self.refuse: int | None = None
         """Answer every request with this status, e.g. 429."""
+        self.stale: dict[date, list[dict[str, Any]]] = {}
+        """Days whose GETs serve this older copy while HEAD and totals announce the
+        current one, as zKillboard's CDN did on 2026-10-12."""
         router.route(url__regex=rf"{ZKILL_URL}/.*").mock(side_effect=self._handle)
 
     def put(self, day: date, docs: list[dict[str, Any]]) -> None:
@@ -61,6 +64,8 @@ class FakeR2Z2:
         if day is None:
             return httpx.Response(404)
         docs = self.days[day]
+        if request.method == "GET" and day in self.stale:
+            docs = self.stale[day]
         if path.startswith("/history/raw/"):
             body = {
                 str(d["killmail_id"]): {k: v for k, v in d.items() if k != "killmail_hash"}
@@ -230,4 +235,47 @@ def test_a_capped_backfill_heads_its_pending_days_once(env: SyncEnv, r2z2: FakeR
     sync_zkill(env, client, max_objects=2)  # three still pending, listing unchanged
     assert sum(n for k, n in r2z2.hits.items() if k.startswith("HEAD ")) == heads
     assert env.lake.read("zkillboard_killmails").num_rows == 8
+    client.close()
+
+
+def test_an_older_copy_served_three_syncs_running_is_imported_as_provisional(
+    env: SyncEnv, r2z2: FakeR2Z2
+) -> None:
+    docs = fixture_documents()
+    key = f"{DAY.year}/{DAY:%Y%m%d}.json"
+    r2z2.put(DAY, docs[:4])
+    r2z2.stale[DAY] = docs[:3]
+    client = zkill_client(env)
+
+    for _ in range(2):  # could be a rewrite during the sync: deferred, nothing imported
+        run = sync_zkill(env, client)
+        assert run.status is RunStatus.SUCCEEDED and run.objects_changed == 0
+    obj = env.registry.get_object(ZKILLBOARD_KILLMAILS.name, key)
+    assert obj is not None and obj.status is ObjectStatus.CHANGED and obj.stale_runs == 2
+
+    run = sync_zkill(env, client)  # the third: the copy served is taken
+    assert run.objects_changed == 1
+    obj = env.registry.get_object(ZKILLBOARD_KILLMAILS.name, key)
+    assert obj is not None and obj.status is ObjectStatus.PROVISIONAL
+    assert env.lake.read("killmails", date_from=DAY, date_to=DAY).num_rows == 3
+    report = verify_dataset(
+        env.settings, env.registry, env.lake, ZKILLBOARD_KILLMAILS, totals={key[5:13]: 4}
+    )
+    assert report.ok, report.issues
+    assert [n.kind for n in report.notes] == ["provisional"]
+
+    raw_gets = f"GET /history/raw/{DAY:%Y%m%d}.json"
+    before = r2z2.hits[raw_gets]
+    run = sync_zkill(env, client)  # still the older copy: checked, nothing new
+    assert run.objects_changed == 0 and r2z2.hits[raw_gets] == before + 1
+    assert len(env.registry.revisions(ZKILLBOARD_KILLMAILS.name, key)) == 1
+    obj = env.registry.get_object(ZKILLBOARD_KILLMAILS.name, key)
+    assert obj is not None and obj.status is ObjectStatus.PROVISIONAL
+
+    del r2z2.stale[DAY]  # the CDN catches up
+    run = sync_zkill(env, client)
+    assert run.objects_changed == 1
+    obj = env.registry.get_object(ZKILLBOARD_KILLMAILS.name, key)
+    assert obj is not None and obj.status is ObjectStatus.IMPORTED and obj.stale_etag is None
+    assert env.lake.read("killmails", date_from=DAY, date_to=DAY).num_rows == 4
     client.close()

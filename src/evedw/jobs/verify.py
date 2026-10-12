@@ -1,5 +1,6 @@
 """Read-only consistency checks between registry, lake, raw files and upstream totals."""
 
+import gzip
 import hashlib
 import json
 import logging
@@ -74,9 +75,10 @@ class VerifyReport:
         return "\n".join(lines)
 
 
-def sha256_file(path: Path) -> str:
+def sha256_file(path: Path, *, gzipped: bool = False) -> str:
+    """sha256 of the file, or of its decompressed bytes when the warehouse gzipped it."""
     digest = hashlib.sha256()
-    with path.open("rb") as fh:
+    with gzip.open(path, "rb") if gzipped else path.open("rb") as fh:
         for chunk in iter(lambda: fh.read(1 << 20), b""):
             digest.update(chunk)
     return digest.hexdigest()
@@ -100,7 +102,8 @@ def verify_dataset(
     imported_dates: set[date] = set()
 
     for obj in objects:
-        if obj.status is not ObjectStatus.IMPORTED or obj.current_revision is None:
+        live = obj.status in (ObjectStatus.IMPORTED, ObjectStatus.PROVISIONAL)
+        if not live or obj.current_revision is None:
             if obj.status is ObjectStatus.FAILED:
                 report.issues.append(
                     Issue(dataset.name, obj.object_key, "failed_object", obj.last_error or "")
@@ -158,7 +161,7 @@ def verify_dataset(
             )
         elif hash_raw:
             report.raw_files_hashed += 1
-            actual = sha256_file(raw)
+            actual = sha256_file(raw, gzipped=dataset.raw_gzipped)
             if actual != revision.sha256:
                 report.issues.append(
                     Issue(
@@ -169,7 +172,19 @@ def verify_dataset(
                         f"registry says {revision.sha256[:12]}",
                     )
                 )
-        if totals is not None and obj.logical_date is not None:
+        if obj.status is ObjectStatus.PROVISIONAL:
+            # Upstream's download still serves an older copy than its headers announce;
+            # the sync takes the newer one when it is served (design §6).
+            report.notes.append(
+                Issue(
+                    dataset.name,
+                    obj.object_key,
+                    "provisional",
+                    f"{obj.object_key}: revision {revision.revision} is the older copy "
+                    f"upstream still serves ({revision.observed_count} rows)",
+                )
+            )
+        elif totals is not None and obj.logical_date is not None:
             expected = totals.get(dataset.totals_key(obj.logical_date))
             if expected is not None and expected != revision.observed_count:
                 report.issues.append(

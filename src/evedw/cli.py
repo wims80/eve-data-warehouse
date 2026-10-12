@@ -250,22 +250,27 @@ def _print_status(
     print(f"service       {service_url or 'not running'}")
     by_name = {s.dataset: s for s in summaries}
     print()
-    print(f"{'dataset':<20} {'parser':>6} {'imported':>9} {'pending':>8} {'other':>6}  range")
+    print(
+        f"{'dataset':<20} {'parser':>6} {'imported':>9} {'provisional':>11} {'pending':>8} "
+        f"{'other':>6}  range"
+    )
     for name, dataset in sorted(DATASETS.items()):
         summary = by_name.get(name)
         if summary is None:
-            print(f"{name:<20} {dataset.parser_version:>6} {0:>9} {0:>8} {0:>6}  -")
+            print(f"{name:<20} {dataset.parser_version:>6} {0:>9} {0:>11} {0:>8} {0:>6}  -")
             continue
         counts = summary.objects_by_status
         imported = counts.get("imported", 0)
+        provisional = counts.get("provisional", 0)
         pending = sum(counts.get(s, 0) for s in ("new", "changed", "fetched", "failed"))
-        other = sum(counts.values()) - imported - pending
+        other = sum(counts.values()) - imported - provisional - pending
         if summary.oldest_imported and summary.newest_imported:
             span = f"{summary.oldest_imported} .. {summary.newest_imported}"
         else:
             span = "-"
         print(
-            f"{name:<20} {dataset.parser_version:>6} {imported:>9} {pending:>8} {other:>6}  {span}"
+            f"{name:<20} {dataset.parser_version:>6} {imported:>9} {provisional:>11} "
+            f"{pending:>8} {other:>6}  {span}"
         )
     print()
     if not runs:

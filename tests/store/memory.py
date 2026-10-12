@@ -230,6 +230,7 @@ class MemoryRegistry:
         observed_count: int,
         verified: bool | None,
         imported_at: datetime,
+        provisional: bool = False,
     ) -> None:
         with self._lock:
             chain = self._revisions.get((dataset, object_key), [])
@@ -246,9 +247,33 @@ class MemoryRegistry:
                     chain[index] = replace(r, status=RevisionStatus.SUPERSEDED)
             obj = self._objects.get((dataset, object_key))
             if obj is not None:
-                self._objects[(dataset, object_key)] = replace(
-                    obj, current_revision=revision, status=ObjectStatus.IMPORTED, last_error=None
-                )
+                if provisional:
+                    self._objects[(dataset, object_key)] = replace(
+                        obj,
+                        current_revision=revision,
+                        status=ObjectStatus.PROVISIONAL,
+                        last_error=None,
+                    )
+                else:
+                    self._objects[(dataset, object_key)] = replace(
+                        obj,
+                        current_revision=revision,
+                        status=ObjectStatus.IMPORTED,
+                        last_error=None,
+                        stale_etag=None,
+                        stale_runs=0,
+                    )
+
+    def note_stale(self, dataset: str, object_key: str, served_etag: str) -> int:
+        with self._lock:
+            obj = self._objects.get((dataset, object_key))
+            if obj is None:
+                return 0
+            runs = obj.stale_runs + 1 if obj.stale_etag == served_etag else 1
+            self._objects[(dataset, object_key)] = replace(
+                obj, stale_etag=served_etag, stale_runs=runs
+            )
+            return runs
 
     def set_revision_status(
         self, dataset: str, object_key: str, revision: int, status: RevisionStatus

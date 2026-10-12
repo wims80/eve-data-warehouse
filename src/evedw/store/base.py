@@ -92,9 +92,18 @@ class Registry(Protocol):
         observed_count: int,
         verified: bool | None,
         imported_at: datetime,
+        provisional: bool = False,
     ) -> None:
         """Make ``revision`` current. One transaction: revision -> imported, previous
-        current -> superseded, object -> imported with ``current_revision`` set."""
+        current -> superseded, object -> imported with ``current_revision`` set and its
+        stale etag cleared; with ``provisional`` the object goes to ``provisional`` and
+        keeps its stale etag."""
+        ...
+
+    def note_stale(self, dataset: str, object_key: str, served_etag: str) -> int:
+        """Record that a download served ``served_etag`` instead of the recorded etag.
+        Returns how many consecutive syncs have now served it: 1 when it differs from the
+        previous stale etag."""
         ...
 
     def set_revision_status(

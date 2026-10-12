@@ -113,6 +113,8 @@ def save_policy(path: Path, policy: ZKillboardPolicy) -> None:
 
 
 class ZKillboardClient(EveRefClient):
+    source_name = "zKillboard"
+
     def __init__(
         self,
         base_url: str,
@@ -291,7 +293,8 @@ class ZKillboardClient(EveRefClient):
                     etag = normalize_etag(response.headers.get("ETag"))
                     if expected_etag and etag and etag != expected_etag:
                         raise UpstreamChangedError(
-                            f"{url}: served etag {etag} differs from discovered {expected_etag}"
+                            f"{url}: served etag {etag} differs from discovered {expected_etag}",
+                            served_etag=etag,
                         )
                     with gzip.open(part, "wb", compresslevel=6) as out:
                         for chunk in response.iter_bytes(1 << 20):

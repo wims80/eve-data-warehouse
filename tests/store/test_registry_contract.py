@@ -185,6 +185,32 @@ def test_revisions_number_sequentially_and_promote_swaps_current(registry: Regis
     assert registry.objects_changed_since("killmails", later) == []
 
 
+def test_stale_etags_count_runs_and_a_provisional_promote_keeps_them(
+    registry: Registry,
+) -> None:
+    key = "2026/killmails-2026-10-01.tar.bz2"
+    registry.upsert_objects([discovered(key)], now=NOW)
+    assert registry.note_stale("killmails", key, "old-1") == 1
+    assert registry.note_stale("killmails", key, "old-1") == 2
+    assert registry.note_stale("killmails", key, "old-2") == 1  # another copy starts over
+    assert registry.note_stale("killmails", key, "old-2") == 2
+    assert registry.note_stale("killmails", "2026/absent.tar.bz2", "old-1") == 0
+
+    registry.add_revision(new_revision(key, "a" * 64))
+    registry.promote(
+        "killmails", key, 1, observed_count=10, verified=False, imported_at=NOW, provisional=True
+    )
+    obj = registry.get_object("killmails", key)
+    assert obj is not None and obj.status is ObjectStatus.PROVISIONAL
+    assert obj.current_revision == 1 and (obj.stale_etag, obj.stale_runs) == ("old-2", 2)
+
+    registry.add_revision(new_revision(key, "b" * 64))
+    registry.promote("killmails", key, 2, observed_count=15000, verified=True, imported_at=NOW)
+    obj = registry.get_object("killmails", key)
+    assert obj is not None and obj.status is ObjectStatus.IMPORTED
+    assert (obj.stale_etag, obj.stale_runs) == (None, 0)
+
+
 def test_failed_revision_keeps_previous_current(registry: Registry) -> None:
     key = "2026/killmails-2026-10-01.tar.bz2"
     registry.upsert_objects([discovered(key)], now=NOW)

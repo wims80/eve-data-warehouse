@@ -336,8 +336,9 @@ operations, not SQL. Columns below are the logical model.
 | expected_count | from totals.json, null if absent |
 | discovered_at, last_seen_at | |
 | current_revision | revision number whose data is live in the lake, null if none |
-| status | `new`, `changed`, `fetching`, `fetched`, `importing`, `imported`, `failed`, `gone`, `skipped` |
+| status | `new`, `changed`, `fetching`, `fetched`, `importing`, `imported`, `provisional`, `failed`, `gone`, `skipped` |
 | last_error | |
+| stale_etag, stale_runs | the etag downloads kept serving while discovery recorded another, and for how many consecutive syncs (section 6) |
 
 `source_revision`, one row per fetched content hash of an object:
 
@@ -418,7 +419,8 @@ discover   fetch per-year index.json for the object listing, then HEAD a
            before, about 30 such killmail days were HEADed on every sync.
            A listing that answers 404 drops its cached body. Each
            sync logs `EVE Ref traffic: N listing requests (M answered 304),
-           H HEADs, D downloads`. Measured over 12 scheduled syncs,
+           H HEADs, D downloads` (`zKillboard traffic: ...` for zKillboard
+           syncs since 2026-10-12). Measured over 12 scheduled syncs,
            2026-10-09 22:12 to 2026-10-11 05:00 UTC: killmails 20 or 21 of
            21 listings answered 304, market history 22 or 23 of 25 (the
            current year and the totals change with every new day), 28 to
@@ -434,6 +436,25 @@ discover   fetch per-year index.json for the object listing, then HEAD a
            history days during a long backfill run). An object with a
            `last_error` always gets fresh headers on the next sync, so it is
            fetched with its new etag then.
+           Upstream can also keep serving an older copy for hours: on
+           2026-10-12 zKillboard's HEAD and `totals.json` announced a
+           republished day while its GET kept serving the previous file,
+           with the same etag, on every sync from 18:00 to the next morning
+           (nine days at once after one republish; two cleared only when the
+           day was rewritten again). The refused download records the etag
+           it was served (`stale_etag`) and counts consecutive syncs that
+           served it (`stale_runs`, reset when another etag is served). At
+           three (decided 2026-10-12), the sync takes the copy it is served:
+           it imports it, or keeps the live revision if that is already this
+           copy, and the object goes to `provisional`. A provisional object
+           stays pending: every sync HEADs it and checks the download again,
+           which costs a HEAD and a GET aborted after its headers while the
+           older copy is still served, and imports the announced file as a
+           normal revision once it is served, which clears `stale_etag`.
+           The older copy is still whole ESI killmails, so the day stays
+           complete apart from what the newer copy adds; `verify` lists
+           provisional objects as notes. The rule is the same for every
+           source.
 fetch      skip an object whose live revision already has its etag under
            the current parser_version (an identical rewrite upstream only
            moves Last-Modified); mark it `imported` again, unless forced.
@@ -1059,6 +1080,11 @@ again before the client changes:
   mismatches listed with the gap.
 - Partitions on disk with no registry row, and the reverse.
 - Unknown JSON keys recorded by imports.
+- Raw files the warehouse stores gzip-compressed (zKillboard's day files)
+  are hashed decompressed, because their sha256 is of the file as served.
+- Provisional objects (section 6) are checked like imported ones and listed
+  as notes, with no count check against totals.json: their copy is older
+  than the one totals.json counts.
 - Killmails across sources (section 7.1): no `killmail_id` twice in the
   merged layer; per UTC day of `killmail_time`, the merged count at least
   each source's count of distinct killmails of that day; days a source

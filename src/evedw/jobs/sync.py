@@ -31,6 +31,10 @@ from evedw.store.base import PartitionInfo
 
 log = logging.getLogger(__name__)
 
+STALE_RUNS = 3
+"""Consecutive syncs whose download serves the same other etag than discovery recorded,
+after which that copy is imported as provisional (design §6)."""
+
 
 class DiskSpaceError(RuntimeError):
     pass
@@ -120,7 +124,8 @@ class SyncJob:
             try:
                 return self._run(ctx)
             finally:
-                log.info("EVE Ref traffic: %s", self.client.traffic.since(before).describe())
+                traffic = self.client.traffic.since(before).describe()
+                log.info("%s traffic: %s", self.client.source_name, traffic)
 
     # -- discovery -----------------------------------------------------------------------
 
@@ -206,6 +211,8 @@ class SyncJob:
                         or known.last_error is not None
                     )
                 )
+                # A provisional object waits for upstream to serve the newer copy.
+                or known.status is ObjectStatus.PROVISIONAL
                 or (known.differs_from(obj) and not obj.listing_unchanged)
                 or (obj.logical_date is not None and obj.logical_date >= tail_start)
             ):
@@ -288,7 +295,10 @@ class SyncJob:
                 ctx.check_cancelled()
                 with log_context(object_key=obj.object_key):
                     try:
-                        rows += self._process(ctx, obj, scratch)
+                        written = self._process(ctx, obj, scratch)
+                        if written is None:
+                            continue
+                        rows += written
                         imported += 1
                         if obj.logical_date is not None:
                             days.add(obj.logical_date)
@@ -312,21 +322,50 @@ class SyncJob:
             )
         return JobOutcome(objects_changed=imported, rows_written=rows)
 
-    def _process(self, ctx: RunContext, obj: SourceObject, scratch: Path) -> int:
+    def _process(self, ctx: RunContext, obj: SourceObject, scratch: Path) -> int | None:
+        """Rows written, or ``None`` when the live revision already holds what is served."""
+        try:
+            return self._process_copy(ctx, obj, obj, scratch)
+        except UpstreamChangedError as exc:
+            served = exc.served_etag
+            if served is None:
+                raise
+            runs = ctx.registry.note_stale(self.dataset.name, obj.object_key, served)
+            if runs < STALE_RUNS:
+                raise
+            # zKillboard's CDN keeps serving an older copy for hours after the headers
+            # announce a newer one (2026-10-12): take the copy it serves, keep checking.
+            log.info(
+                "download served etag %s for %d syncs in a row; taking it as provisional",
+                served,
+                runs,
+            )
+            stale = replace(
+                obj, upstream_etag=served, upstream_size=None, upstream_last_modified=None
+            )
+            return self._process_copy(ctx, obj, stale, scratch)
+
+    def _process_copy(
+        self, ctx: RunContext, obj: SourceObject, copy: SourceObject, scratch: Path
+    ) -> int | None:
+        """Import the upstream file whose headers ``copy`` describes: ``obj`` itself, or
+        the older copy a download keeps serving, which is promoted as provisional."""
         registry = ctx.registry
         settings = ctx.settings
+        provisional = copy is not obj
         revision: SourceRevision | None = None
         try:
-            live = self._live_revision(ctx, obj)
+            live = self._live_revision(ctx, copy)
             if live is not None:
-                registry.mark(self.dataset.name, obj.object_key, ObjectStatus.IMPORTED)
-                log.info("content unchanged, revision %d stays live", live.revision)
-                return 0
-            revision = self._reusable_revision(ctx, obj)
+                status = ObjectStatus.PROVISIONAL if provisional else ObjectStatus.IMPORTED
+                registry.mark(self.dataset.name, obj.object_key, status)
+                log.info("content unchanged, revision %d stays live (%s)", live.revision, status)
+                return None
+            revision = self._reusable_revision(ctx, copy)
             if revision is None:
                 ensure_free_space(settings)
                 registry.mark(self.dataset.name, obj.object_key, ObjectStatus.FETCHING)
-                revision = self._fetch(ctx, obj)
+                revision = self._fetch(ctx, copy)
             registry.mark(self.dataset.name, obj.object_key, ObjectStatus.IMPORTING)
             raw_file = settings.data_dir / revision.raw_path
             result = self.importer.import_revision(
@@ -340,6 +379,7 @@ class SyncJob:
                 observed_count=result.rows,
                 verified=verified,
                 imported_at=datetime.now(UTC),
+                provisional=provisional,
             )
             if verified is False:
                 log.warning(
@@ -350,6 +390,8 @@ class SyncJob:
                 )
             else:
                 log.info("imported revision %d: %d rows", revision.revision, result.rows)
+            if provisional:
+                log.info("revision %d is provisional: a newer copy is announced", revision.revision)
             return result.rows
         except (KeyboardInterrupt, JobCancelled):
             registry.mark(
@@ -358,11 +400,17 @@ class SyncJob:
             raise
         except UpstreamChangedError as exc:
             # Rewritten upstream since discovery: not a failure, the next sync takes fresh
-            # headers (last_error is set) and fetches the new file (design §6).
+            # headers (last_error is set) and fetches the new file (design §6). A
+            # provisional object keeps its status: its live revision is still the copy served.
+            status = (
+                ObjectStatus.PROVISIONAL
+                if obj.status is ObjectStatus.PROVISIONAL
+                else ObjectStatus.CHANGED
+            )
             registry.mark(
                 self.dataset.name,
                 obj.object_key,
-                ObjectStatus.CHANGED,
+                status,
                 error=f"rewritten upstream during the sync: {exc}",
             )
             raise

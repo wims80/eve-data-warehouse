@@ -37,7 +37,7 @@ _MIGRATION_NAME = re.compile(r"^(\d{3})_.+\.sql$")
 _OBJECT_COLUMNS = (
     "dataset, object_key, url, logical_date, upstream_etag, upstream_size, "
     "upstream_last_modified, expected_count, discovered_at, last_seen_at, "
-    "current_revision, status, last_error"
+    "current_revision, status, last_error, stale_etag, stale_runs"
 )
 _REVISION_COLUMNS = (
     "dataset, object_key, revision, sha256, size, raw_path, upstream_etag, "
@@ -139,7 +139,7 @@ class DuckDBRegistry:
                     if existing is None:
                         self._con.execute(
                             f"INSERT INTO source_object ({_OBJECT_COLUMNS}) "
-                            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, ?, NULL)",
+                            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, ?, NULL, NULL, 0)",
                             [
                                 seen.dataset,
                                 seen.object_key,
@@ -283,6 +283,8 @@ class DuckDBRegistry:
             current_revision=row[10],
             status=ObjectStatus(row[11]),
             last_error=row[12],
+            stale_etag=row[13],
+            stale_runs=int(row[14] or 0),
         )
 
     # -- revisions -----------------------------------------------------------------------
@@ -332,6 +334,7 @@ class DuckDBRegistry:
         observed_count: int,
         verified: bool | None,
         imported_at: datetime,
+        provisional: bool = False,
     ) -> None:
         with self._lock:
             self._con.begin()
@@ -360,15 +363,37 @@ class DuckDBRegistry:
                         revision,
                     ],
                 )
-                self._con.execute(
-                    "UPDATE source_object SET current_revision = ?, status = ?, last_error = NULL "
-                    "WHERE dataset = ? AND object_key = ?",
-                    [revision, ObjectStatus.IMPORTED.value, dataset, object_key],
-                )
+                if provisional:
+                    self._con.execute(
+                        "UPDATE source_object SET current_revision = ?, status = ?, "
+                        "last_error = NULL WHERE dataset = ? AND object_key = ?",
+                        [revision, ObjectStatus.PROVISIONAL.value, dataset, object_key],
+                    )
+                else:
+                    self._con.execute(
+                        "UPDATE source_object SET current_revision = ?, status = ?, "
+                        "last_error = NULL, stale_etag = NULL, stale_runs = 0 "
+                        "WHERE dataset = ? AND object_key = ?",
+                        [revision, ObjectStatus.IMPORTED.value, dataset, object_key],
+                    )
                 self._con.commit()
             except Exception:
                 self._con.rollback()
                 raise
+
+    def note_stale(self, dataset: str, object_key: str, served_etag: str) -> int:
+        with self._lock:
+            self._con.execute(
+                "UPDATE source_object SET stale_runs = CASE WHEN stale_etag = ? "
+                "THEN coalesce(stale_runs, 0) + 1 ELSE 1 END, stale_etag = ? "
+                "WHERE dataset = ? AND object_key = ?",
+                [served_etag, served_etag, dataset, object_key],
+            )
+            row = self._con.execute(
+                "SELECT stale_runs FROM source_object WHERE dataset = ? AND object_key = ?",
+                [dataset, object_key],
+            ).fetchone()
+        return int(row[0]) if row and row[0] is not None else 0
 
     def set_revision_status(
         self, dataset: str, object_key: str, revision: int, status: RevisionStatus

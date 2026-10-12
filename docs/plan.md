@@ -281,7 +281,13 @@ more only when a year's listing changed. Numbers in design §6.
 
 ## M8. zKillboard as a second killmail source, one merged killmail lake
 
-Code done 2026-10-11; live acceptance in progress.
+Code done 2026-10-11; live acceptance in progress. History backfill done
+2026-10-12 00:13 UTC (6,879 of 6,885 days, no 403 or 429). Nine days then
+stayed deferred because zKillboard's CDN kept serving older copies than its
+headers announced; added 2026-10-12: such a copy is imported as
+`provisional` after three syncs and replaced when the newer one is served
+(design §6), and `verify` hashes gzipped raw files decompressed (it reported
+every zKillboard day as `raw_hash` before).
 
 EVE Ref's daily archives are the only killmail source, and they are not
 complete on their own. Comparing EVE Ref's per-day counts in the lake with
