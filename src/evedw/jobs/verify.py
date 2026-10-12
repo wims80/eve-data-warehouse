@@ -306,6 +306,8 @@ class VerifyJob:
                     issue.detail,
                     extra={"dataset": issue.dataset},
                 )
+            for note in report.notes:
+                log.info("note: %s %s", note.kind, note.detail, extra={"dataset": note.dataset})
             log.info("%s", report.to_text().splitlines()[0])
         if any(d.name in ("killmails", "zkillboard_killmails") for d in self.datasets):
             merged = verify_killmail_layers(

@@ -587,6 +587,23 @@ of `EVEDW_ZKILLBOARD_SYNC_MAX` days (default 1,000) an hour, newest first,
 so it never holds the worker for half a day: about seven runs for the whole
 history.
 
+Measured 2026-10-12 at M8 acceptance. The zKillboard history import ran from
+2026-10-11 14:00 to 2026-10-12 00:13 UTC in 1,000-day hourly slices (300 s
+apart for the last runs), about 3.5 s a day for recent days and faster for
+old ones, with no 403 or 429; it retains 23 GB of gzipped raw files. Over
+6,886 days (2007-12-05 to 2026-10-11) the merged layer holds 95,739,833
+killmails, each id once: 95,666,326 from both sources, 51,733 from
+zKillboard only, 21,774 from EVE Ref only. EVE Ref's partitions hold
+95,702,143 rows of 95,688,100 distinct ids (the 14,043 repeated across
+2026-01-05/06), zKillboard's 95,718,059. Counting each source's distinct
+killmails per UTC day of `killmail_time`, the sources agree on 6,489 days,
+zKillboard has more on 394 and EVE Ref on 3; no merged day is below either.
+EVE Ref lacks 2026-07-13 (15,746 killmails) and, until it publishes it,
+2026-10-11. Nine zKillboard days were provisional (section 6): their older
+copies are 1 to 5 killmails short of `totals.json`. `verify` with hashing
+covers all datasets in about 7 minutes, most of it decompressing
+zKillboard's raw files.
+
 ### 7.2 Market history
 
 One table `market_history` partitioned by `date`: `date, region_id, type_id,

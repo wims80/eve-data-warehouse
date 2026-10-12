@@ -1,9 +1,9 @@
 # Implementation plan
 
 Status: M0 to M5 complete (2026-10-07), M6 (entity coverage) complete
-(2026-10-09), M7 (gentler EVE Ref traffic) complete (2026-10-11). M8 (zKillboard
-as a second killmail source, one merged lake) code done, live acceptance in
-progress; then M9 (live killmails) and M10 (entity discovery and manual add).
+(2026-10-09), M7 (gentler EVE Ref traffic) complete (2026-10-11), M8 (zKillboard
+as a second killmail source, one merged lake) complete (2026-10-12). Next M9
+(live killmails), then M10 (entity discovery and manual add).
 
 Milestones are ordered so that each one leaves a working, testable system.
 Do not start a milestone before the previous one's acceptance checks pass.
@@ -281,7 +281,7 @@ more only when a year's listing changed. Numbers in design §6.
 
 ## M8. zKillboard as a second killmail source, one merged killmail lake
 
-Code done 2026-10-11; live acceptance in progress. History backfill done
+Accepted 2026-10-12. Code done 2026-10-11. History backfill done
 2026-10-12 00:13 UTC (6,879 of 6,885 days, no 403 or 429). Nine days then
 stayed deferred because zKillboard's CDN kept serving older copies than its
 headers announced; added 2026-10-12: such a copy is imported as
@@ -378,9 +378,22 @@ merged count is at least the larger source count; the 2026-01-06
 duplicates are gone; `verify` reports the cross-source differences;
 consumers read the merged tables unchanged in shape apart from `sources`.
 
+Result (2026-10-12 19:31 UTC, numbers in design §7.1): all 6,886 zKillboard
+days imported and retained, nine of them provisional, no 403 or 429 during
+the import; the merged layer holds 95,739,833 killmails, each id once, over
+6,886 days; 2026-07-13 has 15,746; no day's merged count is below either
+source; the 14,043 ids EVE Ref repeats across 2026-01-05/06 appear once;
+`verify` (hashing everything, 22,180 objects) found 0 issues in zKillboard
+and in the merged layer, noted the nine provisional days and the two days EVE
+Ref lacks (2026-07-13, 2026-10-11), and 26 `expected_count` differences in
+EVE Ref's own data (25 killmail days from 2026-07-15 to 2026-09-11 trailing
+its totals by 1 to 4 killmails, two by 17 and 20, and the current market
+history day); the merged tables
+keep their columns, with `sources` added to `killmails`.
+
 ## M9. Live killmails from zKillboard
 
-Not started. Starts once M8 is accepted.
+Not started.
 
 R2Z2's live feed: `GET /ephemeral/sequence.json` gives the current sequence,
 `GET /ephemeral/{sequence}.json` one object, 404 when none is newer yet.
