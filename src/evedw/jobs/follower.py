@@ -40,6 +40,8 @@ AFTER_REFUSAL = 60.0
 """How often a paused or stopped follower looks at the zKillboard policy again."""
 POINTER_REFRESH = timedelta(minutes=1)
 """Least time between ``sequence.json`` reads while the feed answers 404."""
+GAP_GRACE = timedelta(minutes=2)
+"""How long a sequence below the pointer keeps answering 404 before it is skipped."""
 RESUME_WITHIN = timedelta(hours=24)
 """Objects stay on the feed "at least 24 hours"; a longer absence starts over."""
 
@@ -89,6 +91,8 @@ class LiveFollower:
         self._pointer_at: datetime | None = None
         self._last_flush: datetime | None = None
         self._pending = False
+        self._missing: tuple[int, datetime] | None = None
+        """The sequence answering 404 below the pointer, and since when."""
 
     @property
     def status(self) -> LiveStatus:
@@ -204,7 +208,7 @@ class LiveFollower:
                 continue
             now = self._now()
             if obj is None:
-                if self._is_gap(sequence):
+                if self._is_gap(sequence) and self._gap_held(sequence, now):
                     log.warning("live feed skips sequence %d: none was published", sequence)
                     sequence += 1
                     self._store_sequence(sequence, now)
@@ -244,6 +248,14 @@ class LiveFollower:
             today=today,
             objects_today=(status.objects_today + 1 if status.today == today else 1),
         )
+
+    def _gap_held(self, sequence: int, now: datetime) -> bool:
+        """True once a sequence below the pointer has answered 404 for ``GAP_GRACE``: a
+        moment-late publication or a 404 the CDN still caches is not a gap (one was
+        skipped on its first 404 on 2026-10-13)."""
+        if self._missing is None or self._missing[0] != sequence:
+            self._missing = (sequence, now)
+        return now - self._missing[1] >= GAP_GRACE
 
     def _is_gap(self, sequence: int) -> bool:
         """A 404 below the published pointer means zKillboard never published that

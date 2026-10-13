@@ -255,9 +255,11 @@ def test_follower_skips_a_sequence_below_the_pointer_and_starts_over_after_a_day
     feed.pointer = 12
     clock, waits = Clock(), list[float]()
     env.registry.state_put(SEQUENCE_STATE, json.dumps({"next": 10, "at": T0.isoformat()}), now=T0)
-    f, _ = follower(env, clock, waits)
+    f, _ = follower(env, clock, waits, stop_after_404s=40)
     run(f)
     assert f.status.skipped_sequences == 1
+    # Skipped only after two minutes of 404s below the pointer, not on the first one.
+    assert feed.hits["11.json"] == 21
     assert env.lake.read("killmails").num_rows == 2
 
     feed.pointer = 40

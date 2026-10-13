@@ -658,9 +658,11 @@ never modified after. It stores the next sequence after each object, so a
 restart resumes where it stopped and can fetch an object twice but never
 skip one; it starts from `sequence.json` the first time and after more than
 24 hours away, when the feed no longer holds what it missed and the daily
-history covers it. A 404 below the pointer in `sequence.json` (read at most
-once a minute while the feed answers 404) is a sequence zKillboard never
-published, and is skipped. Every `EVEDW_LIVE_FLUSH_INTERVAL` (30 s) the
+history covers it. A sequence that still answers 404 two minutes after the
+pointer in `sequence.json` (read at most once a minute while the feed answers
+404) has passed it is one zKillboard never published, and is skipped; the two
+minutes, added 2026-10-13 after a skip on the first such 404, let a
+moment-late publication or a 404 the CDN still caches resolve first. Every `EVEDW_LIVE_FLUSH_INTERVAL` (30 s) the
 follower writes what it fetched since its last flush: the newest sequence of
 each killmail wins, and for each UTC day of `killmail_time` among them the
 day's `live` source partitions (`sources/live/`, the same three tables) and
