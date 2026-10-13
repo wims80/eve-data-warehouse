@@ -181,7 +181,14 @@ class LiveFollower:
         self._raw.compress_closed(now=self._now())
         # Objects fetched before a restart and not yet written go out with the first flush.
         self._pending = True
-        self._update(state="following", next_sequence=sequence, flushed_sequence=self._flushed())
+        today = self._now().date()
+        self._update(
+            state="following",
+            next_sequence=sequence,
+            flushed_sequence=self._flushed(),
+            today=today,
+            objects_today=self._raw.count_on(today),
+        )
         while not stop.is_set():
             try:
                 obj = self._client.live_object(sequence)

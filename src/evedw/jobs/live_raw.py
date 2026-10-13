@@ -11,7 +11,7 @@ import os
 import shutil
 import threading
 from collections.abc import Iterator
-from datetime import UTC, datetime
+from datetime import UTC, date, datetime
 from pathlib import Path
 from typing import Any, TextIO
 
@@ -104,6 +104,17 @@ class LiveRaw:
             if p.name.endswith(OPEN_SUFFIX) or p.name.endswith(CLOSED_SUFFIX)
         ]
         return sorted(found, key=lambda p: (p.parent.name, p.name.split(".")[0]))
+
+    def count_on(self, day: date) -> int:
+        """Objects fetched on ``day`` (UTC), from that day's hour files."""
+        with self._lock:
+            if self._open is not None:
+                self._open[1].flush()
+            return sum(
+                sum(1 for _ in _objects(path))
+                for path in self.files()
+                if path.parent.name == day.isoformat()
+            )
 
     def read_since(self, sequence: int | None) -> list[dict[str, Any]]:
         """Objects with a sequence above ``sequence`` (all of them for ``None``), in the

@@ -3,8 +3,8 @@
 Status: M0 to M5 complete (2026-10-07), M6 (entity coverage) complete
 (2026-10-09), M7 (gentler EVE Ref traffic) complete (2026-10-11), M8 (zKillboard
 as a second killmail source, one merged lake) complete (2026-10-12). Next M9
-(live killmails, code done, acceptance in progress), then M10 (entity
-discovery and manual add).
+(live killmails) complete (2026-10-13). Next M10 (entity discovery and
+manual add).
 
 Milestones are ordered so that each one leaves a working, testable system.
 Do not start a milestone before the previous one's acceptance checks pass.
@@ -394,7 +394,7 @@ keep their columns, with `sources` added to `killmails`.
 
 ## M9. Live killmails from zKillboard
 
-Code done 2026-10-12; live acceptance in progress. Settled while building it
+Accepted 2026-10-13. Code done 2026-10-12. Settled while building it
 (design §7.1, §8, §11a): the follower is a thread the service starts, not a
 queued job, and flushes every 30 s itself; `live` is a third killmail
 source, last in precedence, so daily files take over by the existing merge;
@@ -439,9 +439,18 @@ zKillboard publishing them; a restart resumes from the stored sequence with
 no gap and no duplicate; a day's live rows give way to its daily files; a
 full day of following draws no 403 or 429.
 
+Result (2026-10-13 20:44 UTC, numbers in design §7.1): killmails reach the
+merged layer under 40 s after R2Z2 publishes them (R2Z2 itself publishes
+about 54 s after upload); a restart at 09:57 resumed at the stored sequence,
+and the day's 14,802 objects have no missing sequence and no duplicate, with
+69,815 merged rows since 2026-10-10 all distinct; 2026-10-12's live rows gave
+way to its daily file at 06:28, live-only rows staying for killmails the file
+lacks; the full day drew no 403 or 429. After the restart `evedw live status`
+counted the day from zero; it now counts today's raw files on start.
+
 ## M10. Entity discovery and manual add
 
-Not started. Starts once M9 is accepted.
+Not started.
 
 ESI cannot enumerate characters, so a character that never appears on a
 killmail or in a backfill archive stays unknown. eve-kill.com, whose

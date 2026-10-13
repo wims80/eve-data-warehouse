@@ -235,6 +235,7 @@ def test_follower_starts_at_the_pointer_and_resumes_with_no_gap_and_no_duplicate
     clock.at += timedelta(hours=3)
     f, _ = follower(env, clock, waits)
     run(f)
+    assert f.status.objects_today == 7  # counted from today's raw files, not from zero
     # Resumed from the stored sequence; the one read is the gap check at the feed's head.
     assert feed.hits["sequence.json"] == 2
     assert [feed.hits[f"{n}.json"] for n in range(500, 508)] == [1, 1, 1, 1, 2, 1, 1, 1]

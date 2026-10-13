@@ -650,6 +650,22 @@ would put about 2,900 runs a day into the run log. Live partitions are
 built from the raw files, so deleting them and the flushed checkpoint
 rebuilds them.
 
+Measured at M9 acceptance (2026-10-12 20:44 to 2026-10-13 20:44 UTC). The
+follower fetched 14,802 objects, sequences 100003843 to 100018644 with none
+missing, none fetched twice and none skipped, across one deliberate restart
+that resumed at the stored sequence; 14,802 distinct killmails, none
+reprocessed that day. R2Z2 publishes an object about 54 s after its
+`uploaded_at` (52.9 to 58.7 s over a 5-minute sample); the follower fetches
+it within the 6 s of a 404 wait and the flush runs every 30 to 32 s, so a
+killmail is in the merged layer under 40 s after R2Z2 publishes it, 55 to
+90 s after zKillboard's upload. 2,610 flushes, 24 hourly history syncs
+sharing the gate, no 403 or 429 from zKillboard. When zKillboard's 2026-10-12
+file arrived (06:28 UTC), the day held 12,433 killmails from it alone, 2,152
+from it and the feed, and live-only rows for killmails it lacked (3 then, 48
+by evening as late uploads kept coming). Late uploads reach back months: live
+partitions cover 83 days from 2026-07-15. A day of raw objects is about
+6.4 MB gzipped.
+
 `killmail_zkb`: `source_date` (the UTC day of `killmail_time`),
 `killmail_id, sequence_id, uploaded_at, killmail_hash, location_id,
 total_value, fitted_value, dropped_value, destroyed_value,
