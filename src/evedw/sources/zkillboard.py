@@ -14,10 +14,9 @@ import hashlib
 import json
 import logging
 import os
-import threading
 import time
-from collections.abc import Callable, Generator, Iterable
-from contextlib import AbstractContextManager, contextmanager
+from collections.abc import Callable, Iterable
+from contextlib import AbstractContextManager
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
@@ -25,9 +24,9 @@ from typing import Any
 
 import httpx
 
-from evedw import __version__
 from evedw.domain.datasets import Dataset
 from evedw.domain.registry import DiscoveredObject
+from evedw.sources.agent import user_agent
 from evedw.sources.everef import (
     RETRY_STATUS,
     Download,
@@ -38,51 +37,23 @@ from evedw.sources.everef import (
     normalize_etag,
     parse_http_date,
 )
+from evedw.sources.gate import RequestGate
 from evedw.store.base import ResponseCache
 
 log = logging.getLogger(__name__)
 
-PROJECT_URL = "https://github.com/wims80/eve-data-warehouse"
 REFUSED = frozenset({403, 429})
 PAUSE_SECONDS = 3600
 STOP_AFTER = 3
 """Refusals in one UTC day that stop zKillboard work until an operator resumes it."""
 
 
-class ZKillboardGate:
-    """One zKillboard request in flight, and request starts at least ``spacing`` apart, for
-    every client that shares the gate (design §11a). The service's history syncs and its
-    live follower share ``PROCESS_GATE``; a client built without a gate gets its own."""
-
-    def __init__(self) -> None:
-        self._lock = threading.Lock()
-        self._next_start = 0.0
-
-    @contextmanager
-    def turn(
-        self, spacing: float, clock: Callable[[], float], sleep: Callable[[float], None]
-    ) -> Generator[None]:
-        with self._lock:
-            now = clock()
-            start = max(now, self._next_start)
-            if start > now:
-                sleep(start - now)
-            self._next_start = start + spacing
-            yield
-
-
-PROCESS_GATE = ZKillboardGate()
+PROCESS_GATE = RequestGate()
+"""The gate every zKillboard client of the service shares (design §11a)."""
 
 
 class ZKillboardRefused(RuntimeError):
     """zKillboard answered 403 or 429, or a pause or stop from earlier ones is in force."""
-
-
-def user_agent(contact: str | None) -> str:
-    """ "Send a descriptive `User-Agent` with a maintainer or project URL" (zKillboard API
-    documentation)."""
-    who = f"; {contact}" if contact else ""
-    return f"eve-data-warehouse/{__version__} (+{PROJECT_URL}{who})"
 
 
 @dataclass(slots=True)
@@ -157,7 +128,7 @@ class ZKillboardClient(EveRefClient):
         sleep: Callable[[float], None] = time.sleep,
         clock: Callable[[], float] = time.monotonic,
         wall_clock: Callable[[], float] = time.time,
-        gate: ZKillboardGate | None = None,
+        gate: RequestGate | None = None,
     ) -> None:
         super().__init__(
             base_url,
@@ -181,7 +152,7 @@ class ZKillboardClient(EveRefClient):
         self._download_spacing = download_spacing
         self._next_download = 0.0
         self._wall_clock = wall_clock
-        self._gate = gate or ZKillboardGate()
+        self._gate = gate or RequestGate()
 
     # -- policy --------------------------------------------------------------------------
 

@@ -31,7 +31,11 @@ warehouse:
 - Membership reconstruction, throw weight, fight reconstruction, dashboards.
 - EveWho, DOTLAN and zKillboard scraping. zKillboard's documented R2Z2 API is
   a source (decided 2026-10-11, section 2.4); scraping its web pages or
-  querying its per-killmail API in bulk is not.
+  querying its per-killmail API in bulk is not. Documented third-party APIs
+  are allowed as discovery sources (decided 2026-10-13, M10): eve-kill's
+  public API names characters, corporations and alliances ESI cannot list,
+  and everything it names is fetched from ESI before it is stored. ESI stays
+  the source of truth; nothing from eve-kill is stored.
 - Disk budgeting beyond a free-space floor. Nothing is deleted automatically.
 - Authenticated ESI (EVE SSO login), and with it full corporation member
   lists. Only public endpoints are used (decided 2026-10-07).
@@ -143,6 +147,20 @@ Facts below were measured on 2026-10-05 against live EVE Ref data.
   members. Character history does not record the move to Doomheim. None of
   these routes sends rate-limit bucket headers, so only the error limit and
   our own pacing (at most 86,400 requests a day) bound them.
+- Discovery: eve-kill.com's public read-only API (`https://eve-kill.com/api`,
+  no authentication, behind Cloudflare, responses cached 30 s), checked
+  2026-10-13 against its documentation and five requests. `GET /characters`
+  pages every character it knows by ascending id when no `sort` is given
+  (the documentation lists only other sorts), `limit` up to 1,000, the next
+  page `after` the `pagination.cursor` it returns, `hasMore` false at the
+  end; rows carry `character_id, name, corporation_id, alliance_id,
+  faction_id, security_status, last_active`. `GET /characters/count` said
+  21,066,733 (we had 20,864,395); 384 characters lay past our highest id.
+  `GET /corporations/{id}/members` and `GET /alliances/{id}/members` page the
+  same way. No rate limit, User-Agent rule or usage terms are published.
+  Names resolve through ESI, not eve-kill: `POST /universe/ids` takes up to
+  500 names and answers exact matches by category, cached 12 hours (ESI
+  specification, checked 2026-10-13).
 
 ### 2.4 zKillboard R2Z2 killmails
 
@@ -219,6 +237,9 @@ src/evedw/
     everef.py          index.json discovery, totals, download with etag/size checks
     archives.py        tar.bz2 and csv.bz2 readers producing NDJSON/CSV scratch files
     zkillboard.py      R2Z2 history and live feed under the policy of section 11a
+    evekill.py         eve-kill character and member lists under the policy of section 11b
+    gate.py            one request in flight, spaced, per source and process
+    agent.py           the User-Agent the third-party sources get
     esi/
       client.py        httpx client, headers, compatibility date, conditional requests
       policy.py        pacing, error limits, Retry-After, budget; persisted as JSON
@@ -240,6 +261,8 @@ src/evedw/
     killmails.py       NDJSON -> normalised tables
     killmail_merge.py  the merged killmail layer
     follower.py        zKillboard live feed follower, run by the service (section 7.1)
+    discovery.py       characters from eve-kill's list onto the refresh queue (section 7.3)
+    focus.py           entities add: names, members, refreshed in the same run
     live_raw.py        the feed's hourly raw files
     live_flush.py      raw live objects -> the live source and killmail_zkb
     market.py          CSV -> table
@@ -357,7 +380,9 @@ operations, not SQL. Columns below are the logical model.
 | last_error | |
 | stale_etag, stale_runs | the etag downloads kept serving while discovery recorded another, and for how many consecutive syncs (section 6) |
 
-The live follower keeps its place in the state table (`sweep_state`):
+Discovery keeps its progress under `discovery.characters`: the highest
+character id seen, the full walk's cursor and completion time, and counts
+(section 7.3). The live follower keeps its place in the state table (`sweep_state`):
 `zkillboard.live.sequence` holds the next sequence to fetch and when the last
 object came, `zkillboard.live.flushed` the last sequence written to the lake.
 
@@ -804,17 +829,36 @@ the registry's `sweep_state`, so a restart resumes where the slice stopped.
    out of the job, which records the run as failed; nothing else talks to
    ESI until `evedw esi resume`.
 
-Operator focus (`evedw entities add <kind> <id>... [--members]`, job
-`entities:add`, decided 2026-10-08) steers the importer without changing
-what it stores: it queues the named entities as `focus`, ahead of every
-other class, so the next slices refresh them in full. With `--members` a
-corporation brings its known characters, and an alliance brings the
-corporations ESI lists for it now (one request) plus those stored with it,
-and their known characters. A settled entry is pulled forward, since a push
-keeps the lower priority. Characters the warehouse has never seen cannot be
-named this way; finding them is M10's discovery. The job is generic: it
-takes kinds and ids, never a report's notion of what it needs, and queries
-for a report live with the report (section 1).
+Operator focus (`evedw entities add <kind> <id-or-name>... [--members]`, job
+`entities:add`, decided 2026-10-08, names and same-run refresh 2026-10-13)
+steers the importer without changing what it stores: it queues the named
+entities as `focus`, ahead of every other class, and then refreshes them in
+the same run with a drain whose budget is exactly their requests, so focus
+entries are served and the drain stops. Names resolve through ESI's
+`POST /universe/ids`, exact matches only; a name that matches nothing is
+logged and left out. With `--members` a corporation brings its known
+characters, and an alliance brings the corporations ESI lists for it now
+(one request) plus those stored with it, and their known characters; both
+also bring every character eve-kill lists as a member, so members the
+warehouse never saw are fetched too. A settled entry is pulled forward, since
+a push keeps the lower priority. The job is generic: it takes kinds, ids and
+names, never a report's notion of what it needs, and queries for a report
+live with the report (section 1).
+
+Discovery (`entities:discover`, decided 2026-10-13, M10) finds characters
+that never appear on a killmail or in a backfill. Each run first walks
+eve-kill's character list past the highest id seen (at first our own highest
+character id), so characters created since the last run are found without a
+command; then it continues the one-time full walk of the list, about 21,000
+pages, at most `EVEDW_DISCOVER_FULL_PAGES` (600, about 10 minutes) a run, from
+the cursor the last run saved, until it has reached the end once. On every
+page the characters we do not store, and the corporations and alliances they
+name that we do not store, go on the queue as `change`, and the refresh
+slices fetch them from ESI. Progress is saved after every page, so a stopped
+run resumes where it was. It runs every `EVEDW_DISCOVER_INTERVAL` (hourly) in
+the archive lane, since it sends no ESI request; a run with nothing new costs
+one request. With no character stored there is no "past", so the new walk
+waits for the full walk to provide the highest id.
 
 The daily budget (`EVEDW_ESI_DAILY_BUDGET`, default 800,000) bounds all of
 it. Steps 1 to 4 need a few thousand requests a day plus the change rate;
@@ -890,6 +934,7 @@ view per exported file.
 | `entities:refresh` | continuous, paced by ESI policy | sweeps, change queue, active refresh, history crawl (section 7.3) |
 | `entities:seed` all | daily (`EVEDW_SEED_INTERVAL`) | import any listed backfill archive not yet seeded |
 | `entities:export` | daily | write entity Parquet snapshots |
+| `entities:discover` | hourly (`EVEDW_DISCOVER_INTERVAL`) | eve-kill's character list past the highest id seen, then a slice of the full walk (section 7.3) |
 | `verify` | weekly | read-only consistency report |
 | live feed follower | continuous, not a job | follows zKillboard's live feed, flushes every 30 s (section 7.1) |
 
@@ -985,7 +1030,7 @@ Bound to `127.0.0.1:8470` by default. No authentication, local only.
 | `GET /datasets/{name}/objects?changed_since=<ts>` | objects whose current revision was imported after a timestamp (timezone required). The incremental pull primitive for consumers. Without the parameter: every object, oldest first. |
 | `GET /datasets/{name}/objects/{key}` | the object and its full revision chain |
 | `GET /jobs` | job names |
-| `POST /jobs/{name}` with the parameters as a JSON object | queues the job and returns `202` with the run id. Unknown job `404`, bad parameter `422`. Parameters per job: sync `{from, to, force, sweep, offline}`, `entities:seed` `{snapshot, force}`, `entities:refresh` `{budget, populate}`, `entities:add` `{kind, ids, members}`, `verify` `{dataset, from, to, hash, offline}`. |
+| `POST /jobs/{name}` with the parameters as a JSON object | queues the job and returns `202` with the run id. Unknown job `404`, bad parameter `422`. Parameters per job: sync `{from, to, force, sweep, offline}`, `entities:seed` `{snapshot, force}`, `entities:refresh` `{budget, populate}`, `entities:add` `{kind, ids, names, members}`, `entities:discover` `{full_pages}`, `verify` `{dataset, from, to, hash, offline}`. |
 | `GET /runs?limit=&job=` and `GET /runs/{id}` | run log |
 | `GET /lake?table=` | partition manifest: table, partition, path, row count, revision, source sha256, parser version, written_at |
 | `GET /query` | the named queries and their parameters |
@@ -1175,6 +1220,25 @@ again before the client changes:
   zkillboard resume`. State lives in `data/zkillboard/policy.json`.
 - No polling of `/cache/bypass/healthcheck/`; no query strings on API paths.
 
+### 11b. eve-kill policy
+
+Binding for every request to eve-kill by this project, including one-off
+scripts (decided 2026-10-13, M10). eve-kill publishes no rate limit or usage
+terms, so the rules are ours, and gentle:
+
+- The User-Agent of section 11a: the project name and version, its URL and
+  `EVEDW_ESI_CONTACT`; `Accept-Encoding: gzip`.
+- One request in flight across the process: every eve-kill client the
+  service builds shares one gate, and requests start at least
+  `EVEDW_EVEKILL_SPACING` (1 s) apart, so the full walk takes about six hours
+  spread over a day and a half of hourly slices.
+- Pages of 1,000, the largest the API offers, so a walk sends as few requests
+  as it can.
+- A 429 waits for `Retry-After`, at least 30 s, doubling per attempt; 5xx and
+  transport errors retry with backoff. A 403 is not retried: the job fails and
+  logs a warning, and the next scheduled run is the only retry.
+- Nothing eve-kill returns is stored; it only names what ESI is asked for.
+
 ## 12. Verification
 
 `evedw verify [--dataset] [--from --to]`, also scheduled weekly:
@@ -1217,7 +1281,8 @@ Keys: `DATA_DIR`, `BIND`, `MIN_FREE_GB`, `ESI_CONTACT`, `ESI_DAILY_BUDGET`, `ESI
 `AFFILIATION_CYCLE`, `VERIFY_INTERVAL`, `HEAD_DAYS`, `LOG_LEVEL`,
 `ZKILLBOARD_BASE_URL`, `ZKILLBOARD_SPACING`, `ZKILLBOARD_DOWNLOAD_SPACING`,
 `ZKILLBOARD_SYNC_MAX`, `SYNC_INTERVAL_ZKILLBOARD`, `ZKILLBOARD_LIVE`,
-`LIVE_FLUSH_INTERVAL`.
+`LIVE_FLUSH_INTERVAL`, `EVEKILL_BASE_URL`, `EVEKILL_SPACING`, `DISCOVER_INTERVAL`,
+`DISCOVER_FULL_PAGES`.
 Intervals are seconds in the environment. Base URLs are overridable so tests
 can point at a local fixture server. `HEAD_DAYS` defaults to 30 (section 6).
 

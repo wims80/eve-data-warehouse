@@ -54,6 +54,13 @@ request in flight at the configured spacing, conditional requests for the
 history listings, no retry on 403 or 429. Check
 https://zkillboard.com/api/docs/ before changing the client.
 
+## eve-kill
+
+Design §11b is binding for every request to eve-kill, including one-off
+scripts: the descriptive User-Agent, compression, one request in flight at
+the configured spacing, 429 waits for `Retry-After`, no retry on 403. Nothing
+eve-kill returns is stored; what it names is fetched from ESI.
+
 ## Tests
 
 - `uv run pytest` must pass with no network. HTTP is mocked with `respx`.

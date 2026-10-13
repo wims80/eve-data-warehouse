@@ -31,6 +31,7 @@ def test_default_jobs_skip_refresh_without_contact(settings: Settings) -> None:
         "sync:zkillboard_killmails sweep",
         "sync:market_history sweep",
         "entities:seed",
+        "entities:discover",
         "entities:export",
         "verify hash",
     ]

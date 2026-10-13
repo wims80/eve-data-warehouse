@@ -18,7 +18,8 @@ from evedw.jobs.follower import AFTER_NOT_FOUND, SEQUENCE_STATE, LiveFollower
 from evedw.jobs.live_flush import LiveFlush
 from evedw.jobs.live_raw import LiveRaw
 from evedw.jobs.verify import verify_killmail_layers
-from evedw.sources.zkillboard import ZKillboardClient, ZKillboardGate
+from evedw.sources.gate import RequestGate
+from evedw.sources.zkillboard import ZKillboardClient
 from tests.helpers import SyncEnv, killmail_name
 from tests.jobs.test_killmails import KILLMAIL_FIXTURE, fixture_documents
 
@@ -298,7 +299,7 @@ def test_clients_sharing_a_gate_keep_one_spacing_between_them(env: SyncEnv, feed
         slept.append(seconds)
         now[0] += seconds
 
-    gate = ZKillboardGate()
+    gate = RequestGate()
     clients = [
         ZKillboardClient(
             ZKILL_URL,

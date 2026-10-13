@@ -59,6 +59,10 @@ KILLMAIL_ID_COLUMNS: dict[str, dict[str, str]] = {
 
 ALLIANCE_STATE = "refresh.alliance_sweep"
 RECENT_STATE = "refresh.affiliation_recent"
+DISCOVERY_STATE = "discovery.characters"
+"""The discovery job's progress (``jobs/discovery.py``), shown with the sweeps: ``after``
+(highest id seen), ``full_after`` (the full walk's cursor), ``full_done_at``,
+``new_found``, ``full_found``, ``full_pages``, ``last_run``."""
 CYCLE_STATE = "refresh.affiliation_cycle"
 CRAWL_STATE = "refresh.crawl"
 
@@ -176,7 +180,7 @@ def refresh_status(
         for cls in RefreshClass
     }
     state: dict[str, Any] = {}
-    for key in (ALLIANCE_STATE, RECENT_STATE, CYCLE_STATE, CRAWL_STATE):
+    for key in (ALLIANCE_STATE, RECENT_STATE, CYCLE_STATE, CRAWL_STATE, DISCOVERY_STATE):
         value = _load(registry, key)
         if isinstance(value.get("ids"), list):
             value["alliances"] = len(value.pop("ids"))  # pyright: ignore[reportUnknownArgumentType]

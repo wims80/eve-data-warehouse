@@ -3,8 +3,8 @@
 Status: M0 to M5 complete (2026-10-07), M6 (entity coverage) complete
 (2026-10-09), M7 (gentler EVE Ref traffic) complete (2026-10-11), M8 (zKillboard
 as a second killmail source, one merged lake) complete (2026-10-12). Next M9
-(live killmails) complete (2026-10-13). Next M10 (entity discovery and
-manual add).
+(live killmails) complete (2026-10-13). M10 (entity discovery and manual
+add) code done, acceptance in progress.
 
 Milestones are ordered so that each one leaves a working, testable system.
 Do not start a milestone before the previous one's acceptance checks pass.
@@ -450,7 +450,15 @@ counted the day from zero; it now counts today's raw files on start.
 
 ## M10. Entity discovery and manual add
 
-Not started.
+Code done 2026-10-13; live acceptance in progress. Settled while building it
+(design §2.3, §7.3, §11b): eve-kill's documentation no longer lists an id
+sort, but `/characters` without `sort` still pages by ascending id (checked
+2026-10-13), so the walks work as planned; discovery runs hourly, not daily,
+because a run with nothing new costs one request, and each run also reads a
+600-page slice of the full walk until it is done, so the walk never holds
+the archive lane for six hours; `entities add` refreshes in the same run
+with a drain budgeted to exactly its entities; members come from eve-kill
+for corporations and alliances alike; eve-kill requests start 1 s apart.
 
 ESI cannot enumerate characters, so a character that never appears on a
 killmail or in a backfill archive stays unknown. eve-kill.com, whose

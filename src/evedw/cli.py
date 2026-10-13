@@ -566,26 +566,51 @@ def entities_refresh(
 def entities_add(
     ctx: typer.Context,
     kind: Annotated[str, typer.Argument(help="character, corporation or alliance.")],
-    ids: Annotated[list[int], typer.Argument(help="One or more ids.")],
+    entities: Annotated[
+        list[str],
+        typer.Argument(help="One or more ids or exact names (quote names with spaces)."),
+    ],
     members: Annotated[
         bool,
         typer.Option(
             "--members",
-            help="Also the known members: a corporation's characters, an alliance's "
-            "corporations and their characters.",
+            help="Also the members: a corporation's characters, an alliance's corporations "
+            "and their characters, from our tables, ESI and eve-kill.",
         ),
     ] = False,
     no_wait: NoWait = False,
 ) -> None:
-    """Refresh these entities first: queued ahead of everything else, fetched by the next
-    refresh slices."""
+    """Fetch these entities from ESI now, ahead of everything else on the refresh queue.
+    Names resolve through ESI and must match exactly."""
     settings = _state(ctx).settings
-    run = _dispatch(
-        settings,
-        "entities:add",
-        {"kind": kind, "ids": ids, "members": members},
-        wait=not no_wait,
-    )
+    ids = [int(e) for e in entities if e.strip().isdigit()]
+    names = [e for e in entities if not e.strip().isdigit()]
+    params: dict[str, Any] = {"kind": kind, "members": members}
+    if ids:
+        params["ids"] = ids
+    if names:
+        params["names"] = names
+    run = _dispatch(settings, "entities:add", params, wait=not no_wait)
+    _print_run(run, objects="entities added")
+
+
+@entities_app.command("discover")
+def entities_discover(
+    ctx: typer.Context,
+    full_pages: Annotated[
+        int | None,
+        typer.Option(
+            "--full-pages",
+            help="Pages of the full character walk this run may read (default: to the end; "
+            "0 skips it).",
+        ),
+    ] = None,
+    no_wait: NoWait = False,
+) -> None:
+    """Find characters we do not have in eve-kill's character list and queue them, and the
+    corporations and alliances they name, for an ESI refresh."""
+    settings = _state(ctx).settings
+    run = _dispatch(settings, "entities:discover", {"full_pages": full_pages}, wait=not no_wait)
     _print_run(run, objects="entities queued")
 
 

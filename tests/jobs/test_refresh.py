@@ -33,29 +33,6 @@ FOCUS, CHANGE, ACTIVE, IDLE, CRAWL, DEFERRED = (int(c) for c in RefreshClass)
 # --- fixtures and helpers -----------------------------------------------------------------
 
 
-@pytest.fixture
-def cache() -> MemoryCache:
-    return MemoryCache()
-
-
-@pytest.fixture
-def esi(env: SyncEnv, cache: MemoryCache) -> tuple[FakeEsi, FakeClock, EsiClient]:
-    fake = FakeEsi(env.router)
-    clock = FakeClock(now=TODAY_AT.timestamp())
-    client = EsiClient(
-        ESI_URL,
-        compatibility_date="2026-08-18",
-        contact="tests@example.test",
-        cache=cache,
-        policy_path=env.settings.esi_policy_path,
-        daily_budget=1000,
-        client=httpx.Client(),
-        sleep=clock.sleep,
-        clock=clock.time,
-    )
-    return fake, clock, client
-
-
 def job(client: EsiClient, entities: EntityStore, env: SyncEnv, **kwargs: Any) -> RefreshJob:
     return RefreshJob(client, entities, env.lake, today=TODAY, now=lambda: TODAY_AT, **kwargs)
 

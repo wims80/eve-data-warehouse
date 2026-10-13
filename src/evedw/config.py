@@ -52,6 +52,12 @@ class Settings(BaseSettings):
     zkillboard_sync_max: int = 1000
     """Days one scheduled zKillboard sync imports at most, newest first (design §7.1)."""
     sync_interval_zkillboard: timedelta = Field(default=timedelta(hours=1))
+    evekill_base_url: str = "https://eve-kill.com/api"
+    evekill_spacing: float = 1.0
+    """Least seconds between eve-kill request starts (design §11b)."""
+    discover_interval: timedelta = Field(default=timedelta(hours=1))
+    discover_full_pages: int = 600
+    """Pages of eve-kill's character list the full walk reads per discovery run."""
     zkillboard_live: bool = True
     """Follow zKillboard's live feed inside the service (design §7.1)."""
     live_flush_interval: timedelta = Field(default=timedelta(seconds=30))
@@ -109,6 +115,7 @@ class Settings(BaseSettings):
         "verify_interval",
         "esi_refresh_interval",
         "live_flush_interval",
+        "discover_interval",
         mode="before",
     )
     @classmethod

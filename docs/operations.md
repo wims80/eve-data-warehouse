@@ -381,6 +381,27 @@ also holds the follower; it resumes on its own when the pause ends or after
 `evedw zkillboard resume`. The raw objects are under
 `data/raw/zkillboard/live/<day>/<hour>.ndjson.gz`.
 
+## Entity discovery and adding entities
+
+`entities:discover` runs hourly: it asks eve-kill for characters past the
+highest id seen, then reads another slice (600 pages) of the one-time full
+walk of eve-kill's character list until that is done. What it finds goes on
+the refresh queue; the ESI refresh slices fetch it. Progress is the
+`discovery.characters` line of `evedw entities status`:
+
+```
+evedw entities status | /usr/bin/grep discovery
+evedw entities discover --full-pages 0      # only the new characters, now
+```
+
+To fetch particular entities at once, by id or exact name, optionally with
+their members (from our tables, ESI and eve-kill):
+
+```
+evedw entities add character "Dame Hel" 2112000001
+evedw entities add corporation 98000001 --members
+```
+
 ## ESI downtime
 
 ESI work pauses every day around EVE's downtime at 11:00 UTC (design §11):

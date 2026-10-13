@@ -42,6 +42,8 @@ IN_FLIGHT = threading.Lock()
 RETRY_STATUS = frozenset({408, 429})
 STOP_STATUS = frozenset({403, 420})
 MAX_BATCH = 1000
+MAX_NAMES = 500
+"""Names ``POST /universe/ids`` takes at once (ESI specification, checked 2026-10-13)."""
 MAX_WAIT_STEP = 30.0
 
 
@@ -287,6 +289,14 @@ class EsiClient:
         return self._request(
             "POST", route, body=body, fallback_seconds=fallback_seconds, store=store
         )
+
+    def post_names(self, route: str, names: Collection[str], *, store: bool = False) -> EsiResponse:
+        """POST at most 500 distinct names, e.g. ``/universe/ids`` (exact matches only)."""
+        unique = sorted({n.strip() for n in names if n.strip()})
+        if not unique or len(unique) > MAX_NAMES or any(len(n) > 100 for n in unique):
+            raise ValueError(f"ESI name lookups take 1 to {MAX_NAMES} names of 1 to 100 characters")
+        body = json.dumps(unique, separators=(",", ":"))
+        return self._request("POST", route, body=body, fallback_seconds=3600, store=store)
 
     # -- the one request path ------------------------------------------------------------
 
