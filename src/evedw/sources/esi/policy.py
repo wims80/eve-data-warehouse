@@ -45,6 +45,11 @@ SLOW_DOWN_EVERY = 60.0
 CALM_FOR = 300.0
 """Seconds without a warning sign before the spacing halves back towards the floor."""
 
+RATE_LIMITED_CALM = 1800.0
+"""After a 420 or 429 the spacing does not relax for this long: on 2026-10-13 and 14 the
+pace went back to the floor five minutes after each 429 and drew the next one within an
+hour or two, always just past a ten-minute mark."""
+
 DOWNTIME_AT = 11 * 3600
 """EVE's daily downtime, in seconds after midnight UTC."""
 
@@ -201,6 +206,9 @@ class Policy:
     paced_at: float = 0
     """When ``spacing`` last changed."""
     slowed_at: float = 0
+    rate_limited_at: float = 0
+    """When ESI last answered 420 or 429 (0: never); the pace holds for
+    ``RATE_LIMITED_CALM``."""
     slowdowns: int = 0
     routes: dict[str, str] = field(default_factory=lambda: {})
     """Policy route -> rate-limit group, learned from ``X-RateLimit-Group``."""
@@ -229,6 +237,7 @@ class Policy:
             "last_warning": self.last_warning,
             "paced_at": self.paced_at,
             "slowed_at": self.slowed_at,
+            "rate_limited_at": self.rate_limited_at,
             "slowdowns": self.slowdowns,
             "routes": dict(self.routes),
             "buckets": {k: v.to_dict() for k, v in self.buckets.items()},
@@ -264,6 +273,7 @@ class Policy:
             last_warning=float(raw.get("last_warning", 0)),
             paced_at=float(raw.get("paced_at", 0)),
             slowed_at=float(raw.get("slowed_at", 0)),
+            rate_limited_at=float(raw.get("rate_limited_at", 0)),
             slowdowns=int(raw.get("slowdowns", 0)),
             routes=routes,
             buckets=buckets,
@@ -319,20 +329,25 @@ class Policy:
         self.spacing = min(MAX_SPACING, max(self.floor, self.spacing))
         return self.spacing
 
-    def warn(self, now: float) -> None:
-        """A warning sign: double the spacing, at most once per ``SLOW_DOWN_EVERY``."""
+    def warn(self, now: float, *, rate_limited: bool = False) -> None:
+        """A warning sign: double the spacing, at most once per ``SLOW_DOWN_EVERY``.
+        ``rate_limited`` (a 420 or 429) also holds the pace for ``RATE_LIMITED_CALM``."""
         self.last_warning = now
+        if rate_limited:
+            self.rate_limited_at = now
         if now - self.slowed_at >= SLOW_DOWN_EVERY and self.pace() < MAX_SPACING:
             self.spacing = min(MAX_SPACING, self.spacing * 2)
             self.paced_at = self.slowed_at = now
             self.slowdowns += 1
 
     def relax(self, now: float) -> None:
-        """No warning sign: after ``CALM_FOR`` quiet seconds, halve the spacing."""
+        """No warning sign: after ``CALM_FOR`` quiet seconds, halve the spacing; after a
+        420 or 429, only once ``RATE_LIMITED_CALM`` has passed."""
         if (
             self.pace() > self.floor
             and now - self.last_warning >= CALM_FOR
             and now - self.paced_at >= CALM_FOR
+            and (not self.rate_limited_at or now - self.rate_limited_at >= RATE_LIMITED_CALM)
         ):
             self.spacing = max(self.floor, self.spacing / 2)
             self.paced_at = now
@@ -380,7 +395,7 @@ class Policy:
             if warning is None:
                 self.relax(at)
             else:
-                self.warn(at)
+                self.warn(at, rate_limited=status in (420, 429))
         self.next_request = at + self.pace()
 
         retry_after = header(headers, "retry-after")

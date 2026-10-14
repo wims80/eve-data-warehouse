@@ -1120,7 +1120,12 @@ Binding for every ESI request made by this project, including ad hoc scripts.
   the spacing, at most once a minute, up to 2 s: a 429, 420 or 5xx, a
   transport error, fewer than 90 of the 100 legacy errors left in the
   window, or a rate-limit bucket below half. After 5 quiet minutes the
-  spacing halves back towards the floor. Every change is logged (`ESI pace
+  spacing halves back towards the floor; after a 420 or 429, only once 30
+  minutes have passed since it (decided 2026-10-14): on 2026-10-13 and 14 the
+  pace went back to the floor five minutes after each 429 on
+  `/characters/{id}/corporationhistory`, a route without a rate-limit group,
+  and drew the next one within one to two hours, always just past a
+  ten-minute mark. Every change is logged (`ESI pace
   slowed to ...` at warning level), counted in `slowdowns` and shown by
   `evedw esi status`; spacing and timers live in `policy.json`, so a
   restart keeps a slowed pace. A fresh policy starts at 1 s and ramps

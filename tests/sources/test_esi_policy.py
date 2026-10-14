@@ -201,3 +201,21 @@ def test_expected_server_errors_leave_the_pace_alone_and_downtime_survives_a_res
     assert restored.downtime_since == ELEVEN - 120
     assert restored.downtime_reason == "daily downtime at 11:00 UTC"
     assert restored.status_checked_at == ELEVEN - 60
+
+
+def test_a_429_holds_the_pace_for_half_an_hour_before_it_relaxes() -> None:
+    policy = Policy(floor=0.05, spacing=0.05)
+    start = 1_000_000.0
+    policy.observe("/characters/{id}/corporationhistory", 429, {"retry-after": "2"}, start)
+    assert policy.spacing == 0.1 and policy.rate_limited_at == start
+    for minute in range(1, 30):  # quiet responses: five minutes would have relaxed it
+        policy.observe("/characters/{id}", 200, {}, start + minute * 60)
+        assert policy.spacing == 0.1
+    policy.observe("/characters/{id}", 200, {}, start + 1800)
+    assert policy.spacing == 0.05
+    assert Policy.from_dict(policy.to_dict()).rate_limited_at == start
+
+    other = Policy(floor=0.05, spacing=0.05)
+    other.observe("/characters/{id}", 502, {}, start)  # not a rate limit: the usual 5 min
+    other.observe("/characters/{id}", 200, {}, start + 300)
+    assert other.spacing == 0.05
