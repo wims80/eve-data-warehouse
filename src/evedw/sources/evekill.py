@@ -1,4 +1,5 @@
-"""eve-kill.com's public read-only API (design §2.3) under the policy of design §11b.
+"""eve-kill.com's public API (design §2.3; https://eve-kill.com/docs and
+https://eve-kill.com/api/openapi.json) under the policy of design §11b.
 
 Used for discovery only: it lists characters ESI cannot enumerate and the members of a
 corporation or alliance. Nothing it says is stored; what it names is refreshed from ESI.

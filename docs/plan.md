@@ -463,7 +463,9 @@ for corporations and alliances alike; eve-kill requests start 1 s apart.
 ESI cannot enumerate characters, so a character that never appears on a
 killmail or in a backfill archive stays unknown. eve-kill.com, whose
 database exports are the EVE Ref backfills, has a public read-only JSON API
-(`https://eve-kill.com/api`, no auth, behind Cloudflare). Checked
+(`https://eve-kill.com/api`, no auth, behind Cloudflare; documented at
+`https://eve-kill.com/docs` and in `/api/openapi.json` as the data API for
+"the website and third-party applications", checked 2026-10-14). Checked
 2026-10-07: `GET /characters` lists every character it knows, 21,055,422
 against our 20,835,778, with `character_id, name, corporation_id,
 alliance_id, faction_id, security_status, last_active`, up to 1,000 per page

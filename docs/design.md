@@ -147,17 +147,30 @@ Facts below were measured on 2026-10-05 against live EVE Ref data.
   members. Character history does not record the move to Doomheim. None of
   these routes sends rate-limit bucket headers, so only the error limit and
   our own pacing (at most 86,400 requests a day) bound them.
-- Discovery: eve-kill.com's public read-only API (`https://eve-kill.com/api`,
-  no authentication, behind Cloudflare, responses cached 30 s), checked
-  2026-10-13 against its documentation and five requests. `GET /characters`
-  pages every character it knows by ascending id when no `sort` is given
-  (the documentation lists only other sorts), `limit` up to 1,000, the next
-  page `after` the `pagination.cursor` it returns, `hasMore` false at the
-  end; rows carry `character_id, name, corporation_id, alliance_id,
-  faction_id, security_status, last_active`. `GET /characters/count` said
-  21,066,733 (we had 20,864,395); 384 characters lay past our highest id.
+- Discovery: eve-kill.com's public API (`https://eve-kill.com/api`, no
+  authentication for reads, behind Cloudflare, responses cached 30 s). Its
+  documentation is linked from the site as "API Docs"
+  (`https://eve-kill.com/docs`); the OpenAPI document
+  (`https://eve-kill.com/api/openapi.json`, version v0.2.5, checked
+  2026-10-14) calls `/api` "the data API used by the website and third-party
+  applications", names EVE-KILL on GitHub (`https://github.com/eve-kill`) as
+  the contact, and tags every operation we use `x-audience: public`. Its only
+  usage rules, under "Responsible use": every request sends an identifying
+  User-Agent with an application name and a way to contact its operator,
+  responses are reused according to their cache headers, the live feed is
+  preferred for continuous consumption, and traffic shaping and rate
+  limiting, when enabled, happen at the network edge. `GET /characters`
+  ("Cursor-paginated list of every known character") takes `name`, `limit`
+  (schema maximum 1,000; its description says 100, the server takes 1,000)
+  and `after` ("Ascending cursor"); there is no sort, it pages by ascending
+  id, the next page `after` the `pagination.cursor` it returns, `hasMore`
+  false at the end. Rows carry `character_id, name, corporation_id,
+  alliance_id, faction_id, security_status, last_active`.
   `GET /corporations/{id}/members` and `GET /alliances/{id}/members` page the
-  same way. No rate limit, User-Agent rule or usage terms are published.
+  same way. Checked 2026-10-13 with five requests: `GET /characters/count`
+  said 21,066,733 (we had 20,864,395) and 384 characters lay past our
+  highest id. The `/api` index page lists sorts for `/characters` that the
+  OpenAPI document does not.
   Names resolve through ESI, not eve-kill: `POST /universe/ids` takes up to
   500 names and answers exact matches by category, cached 12 hours (ESI
   specification, checked 2026-10-13).
@@ -1225,11 +1238,18 @@ again before the client changes:
 ### 11b. eve-kill policy
 
 Binding for every request to eve-kill by this project, including one-off
-scripts (decided 2026-10-13, M10). eve-kill publishes no rate limit or usage
-terms, so the rules are ours, and gentle:
+scripts (decided 2026-10-13, M10). It follows the "Responsible use" section
+of eve-kill's OpenAPI document (section 2.3, checked 2026-10-14), which is
+checked again before the client changes; that section sets no rate limit,
+so the pacing is ours, and gentle:
 
-- The User-Agent of section 11a: the project name and version, its URL and
+- "Every /api request must send an identifying User-Agent; use an
+  application name and a way to contact its operator": the User-Agent of
+  section 11a, the project name and version, its URL and
   `EVEDW_ESI_CONTACT`; `Accept-Encoding: gzip`.
+- "Reuse responses according to their cache headers": responses are cached
+  30 s, and no page is asked for twice within that; the only repeated
+  request is the hourly one past the highest id.
 - One request in flight across the process: every eve-kill client the
   service builds shares one gate, and requests start at least
   `EVEDW_EVEKILL_SPACING` (1 s) apart, so the full walk takes about six hours

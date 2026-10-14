@@ -59,7 +59,9 @@ https://zkillboard.com/api/docs/ before changing the client.
 Design §11b is binding for every request to eve-kill, including one-off
 scripts: the descriptive User-Agent, compression, one request in flight at
 the configured spacing, 429 waits for `Retry-After`, no retry on 403. Nothing
-eve-kill returns is stored; what it names is fetched from ESI.
+eve-kill returns is stored; what it names is fetched from ESI. Check
+https://eve-kill.com/docs and its "Responsible use" section in
+https://eve-kill.com/api/openapi.json before changing the client.
 
 ## Tests
 
