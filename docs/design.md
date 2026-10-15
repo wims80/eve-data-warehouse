@@ -875,6 +875,22 @@ the archive lane, since it sends no ESI request; a run with nothing new costs
 one request. With no character stored there is no "past", so the new walk
 waits for the full walk to provide the highest id.
 
+Measured at M10 acceptance (2026-10-14 12:10 to 2026-10-15 23:13 UTC, 31
+runs, none failed): 18,200 eve-kill requests, no 403 or 429, one retried
+transport error. The walk past the highest id found 2,336 new characters,
+about 73 an hour. The full walk read 18,168 pages listing 18,170,199
+characters (eve-kill's own count, an estimate, said 21,066,733) and found
+220,634 we did not store: 227 up to id 2,116,132,034, 62,416 and 156,610 in
+its last two slices, which covered the ids created since the 2026-05-10
+backfill snapshot by characters that never appeared on a killmail. With the
+corporations they named, 226,807 entities went on the change queue, about
+450,000 ESI requests for the refresh slices. Manual adds, measured the same
+day: a character by name, stored with its history, in one run of three ESI
+requests; corporation 98745427 with `--members` in one run of 26 ESI
+requests and one eve-kill request, storing two members only eve-kill listed;
+both also with the service stopped. A manual add waits for a refresh slice
+already running in the ESI lane, 16 minutes in that test.
+
 The daily budget (`EVEDW_ESI_DAILY_BUDGET`, default 800,000) bounds all of
 it. Steps 1 to 4 need a few thousand requests a day plus the change rate;
 the crawl gets the rest. At the calm pace (section 11) the pace, not the

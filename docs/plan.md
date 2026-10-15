@@ -4,7 +4,7 @@ Status: M0 to M5 complete (2026-10-07), M6 (entity coverage) complete
 (2026-10-09), M7 (gentler EVE Ref traffic) complete (2026-10-11), M8 (zKillboard
 as a second killmail source, one merged lake) complete (2026-10-12). Next M9
 (live killmails) complete (2026-10-13). M10 (entity discovery and manual
-add) code done, acceptance in progress.
+add) complete (2026-10-16).
 
 Milestones are ordered so that each one leaves a working, testable system.
 Do not start a milestone before the previous one's acceptance checks pass.
@@ -450,8 +450,8 @@ counted the day from zero; it now counts today's raw files on start.
 
 ## M10. Entity discovery and manual add
 
-Code done 2026-10-13; live acceptance in progress. Settled while building it
-(design §2.3, §7.3, §11b): eve-kill's documentation no longer lists an id
+Accepted 2026-10-16. Code done 2026-10-13, deployed 2026-10-14. Settled while
+building it (design §2.3, §7.3, §11b): eve-kill's documentation no longer lists an id
 sort, but `/characters` without `sort` still pages by ascending id (checked
 2026-10-13), so the walks work as planned; discovery runs hourly, not daily,
 because a run with nothing new costs one request, and each run also reads a
@@ -509,6 +509,17 @@ warehouse did not have stores its details and employment history in one
 run; adding a corporation with `--members` stores members eve-kill lists
 that we did not have; everything works from the CLI with the service running
 and without it.
+
+Result (2026-10-16, numbers in design §7.3): hourly discovery found 2,336
+characters created since the previous run, about 73 an hour, with no command
+run; the full walk completed on 2026-10-15 at 23:13 UTC after 18,168 pages
+and found 220,634 characters the warehouse lacked; adding "Jort Ilant
+Brinalle" by name stored the character and its employment history in one
+run; adding corporation 98745427 with `--members` stored two members only
+eve-kill listed; the same commands worked with the service stopped; eve-kill
+refused nothing. Open follow-up: a manual `entities add` waits for a refresh
+slice already running in the ESI lane (16 minutes in the test); the slice
+could end early when a manual job is queued.
 
 ## Consumers
 
