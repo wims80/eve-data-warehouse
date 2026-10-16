@@ -6,7 +6,7 @@ there is none, the command takes the writer lock and runs the same job in-proces
 """
 
 import time
-from collections.abc import Generator
+from collections.abc import Generator, Mapping
 from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import UTC, date, datetime
@@ -17,12 +17,12 @@ import typer
 
 from evedw import __version__
 from evedw.config import Settings
-from evedw.domain.datasets import DATASETS, SYNC_DATASETS, Dataset, get_dataset
+from evedw.domain.datasets import DATASETS, ENTITIES_BACKFILL, SYNC_DATASETS, Dataset, get_dataset
 from evedw.domain.registry import DatasetSummary, ImportRun, RunStatus, Trigger
 from evedw.domain.schemas import ENTITY_TABLES
 from evedw.domain.speed import Sample, describe
 from evedw.jobs.catalog import JobCatalog, UnknownJobError
-from evedw.jobs.refresh import refresh_status
+from evedw.jobs.refresh import DISCOVERY_STATE, refresh_status
 from evedw.jobs.runner import JobCancelled, LockHeldError, WriterLock
 from evedw.jobs.verify import VerifyReport, verify_dataset, verify_killmail_layers
 from evedw.logs import setup_logging
@@ -245,6 +245,8 @@ def _print_status(
     runs: list[ImportRun],
     *,
     service_url: str | None,
+    entity_counts: Mapping[str, int] | None = None,
+    queue: Mapping[str, Mapping[str, int]] | None = None,
 ) -> None:
     print(f"data dir      {settings.data_dir.resolve()}")
     if version is not None:
@@ -257,6 +259,8 @@ def _print_status(
         f"{'other':>6}  range"
     )
     for name, dataset in sorted(DATASETS.items()):
+        if name == ENTITIES_BACKFILL.name:
+            continue  # snapshot archives, not a dataset of rows: their own line below
         summary = by_name.get(name)
         if summary is None:
             print(f"{name:<20} {dataset.parser_version:>6} {0:>9} {0:>11} {0:>8} {0:>6}  -")
@@ -275,6 +279,10 @@ def _print_status(
             f"{pending:>8} {other:>6}  {span}"
         )
     print()
+    print(snapshot_line(by_name.get(ENTITIES_BACKFILL.name)))
+    if entity_counts is not None:
+        print(_entities_line(entity_counts, queue))
+    print()
     if not runs:
         print("no runs recorded")
         return
@@ -285,15 +293,53 @@ def _print_status(
         print(f"{started:<20} {run.job:<24} {run.trigger.value:<8} {run.status.value:<10} {detail}")
 
 
+def snapshot_line(summary: DatasetSummary | None) -> str:
+    """The eve-kill backfill archives that seed the entity tables (design §2.3)."""
+    if summary is None:
+        return "entity snapshots   none seeded"
+    counts = summary.objects_by_status
+    seeded = counts.get("imported", 0)
+    skipped = counts.get("skipped", 0)
+    waiting = sum(v for k, v in counts.items() if k not in ("imported", "skipped", "gone"))
+    span = (
+        f" ({summary.oldest_imported} .. {summary.newest_imported})"
+        if summary.oldest_imported and summary.newest_imported
+        else ""
+    )
+    parts = [f"{seeded} seeded{span}"]
+    if skipped:
+        parts.append(f"{skipped} unsupported")
+    if waiting:
+        parts.append(f"{waiting} waiting")
+    return "entity snapshots   " + ", ".join(parts)
+
+
+def _entities_line(counts: Mapping[str, int], queue: Mapping[str, Mapping[str, int]] | None) -> str:
+    tables = ", ".join(
+        f"{counts.get(t, 0):,} {t}" for t in ("characters", "corporations", "alliances")
+    )
+    if not queue:
+        return f"entities           {tables}"
+    waiting = sum(queue.get(c, {}).get("due", 0) for c in ("focus", "change", "active"))
+    return f"entities           {tables}; {waiting:,} due for refresh (focus, change, active)"
+
+
 @app.command()
 def status(ctx: typer.Context) -> None:
     """Show datasets, object counts by status and recent runs."""
     settings = _state(ctx).settings
     with _service(settings) as service:
         if service is not None:
-            summaries, _ = service.datasets()
+            summaries, counts = service.datasets()
+            queue, _ = service.entity_refresh()
             _print_status(
-                settings, None, summaries, service.runs(limit=10), service_url=service.base_url
+                settings,
+                None,
+                summaries,
+                service.runs(limit=10),
+                service_url=service.base_url,
+                entity_counts=counts,
+                queue=queue,
             )
             return
     if not settings.warehouse_path.exists():
@@ -305,15 +351,21 @@ def status(ctx: typer.Context) -> None:
         if version == 0:
             print("registry is not migrated; run `evedw migrate`")
             raise typer.Exit(code=1)
-        _print_status(
-            settings,
-            version,
-            registry.dataset_summaries(),
-            registry.runs(limit=10),
-            service_url=None,
-        )
+        summaries = registry.dataset_summaries()
+        runs = registry.runs(limit=10)
+        queue, _ = refresh_status(registry, now=datetime.now(UTC))
     finally:
         registry.close()
+    # The entity tables share the database; DuckDB will not hold it read-only and
+    # read-write at once in one process, so they are read after the registry is closed.
+    entities = open_entity_store(settings)
+    try:
+        counts = {table: entities.count(table) for table in ENTITY_TABLES}
+    finally:
+        entities.close()
+    _print_status(
+        settings, version, summaries, runs, service_url=None, entity_counts=counts, queue=queue
+    )
 
 
 @app.command()
@@ -526,8 +578,46 @@ def _print_entity_counts(settings: Settings) -> None:
         print(f"  {cls:<28} {numbers['entries']:>12} {numbers['due']:>12}")
     print()
     for name, value in sweeps.items():
+        if name == DISCOVERY_STATE:
+            continue
         detail = ", ".join(f"{k}={v}" for k, v in sorted(value.items())) or "not started"
         print(f"{name:<22} {detail}")
+    print()
+    for line in discovery_lines(sweeps.get(DISCOVERY_STATE) or {}):
+        print(line)
+
+
+def discovery_lines(state: Mapping[str, Any]) -> list[str]:
+    """Discovery progress (design §7.3) as sentences, not the raw state."""
+    if not state:
+        return ["discovery          not run yet"]
+    last = _when(state.get("last_run"))
+    lines = [
+        f"discovery          last run {last}, {int(state.get('new_found', 0)):,} new "
+        f"characters found past the highest id ({state.get('after', '-')})"
+    ]
+    done = state.get("full_done_at")
+    pages = int(state.get("full_pages", 0))
+    found = int(state.get("full_found", 0))
+    if done:
+        lines.append(f"full walk          done {_when(done)}, {pages:,} pages, {found:,} found")
+    elif pages:
+        lines.append(
+            f"full walk          {pages:,} pages read so far, {found:,} found, "
+            f"next after id {state.get('full_after', '-')}"
+        )
+    else:
+        lines.append("full walk          not started")
+    return lines
+
+
+def _when(value: Any) -> str:
+    if not isinstance(value, str):
+        return "-"
+    try:
+        return datetime.fromisoformat(value).astimezone(UTC).strftime("%Y-%m-%d %H:%M UTC")
+    except ValueError:
+        return value
 
 
 @entities_app.command("refresh")

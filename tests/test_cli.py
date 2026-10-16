@@ -1,6 +1,7 @@
 import json
 import re
 from collections.abc import Iterator
+from datetime import date
 from pathlib import Path
 
 import httpx
@@ -40,6 +41,8 @@ def test_migrate_then_status(data_dir: Path) -> None:
     result = runner.invoke(app, ["--data-dir", str(data_dir), "status"])
     assert result.exit_code == 0, result.output
     assert "schema        version 4" in result.output
+    assert "entity snapshots   none seeded" in result.output
+    assert "entities           0 characters, 0 corporations, 0 alliances; 0 due" in result.output
     assert "killmails" in result.output
     assert "market_history" in result.output
     assert "no runs recorded" in result.output
@@ -60,6 +63,7 @@ def test_entities_and_esi_status(data_dir: Path) -> None:
     assert "characters" in result.output and "corporation_alliance_history" in result.output
     assert "change" in result.output and "crawl" in result.output
     assert "affiliation_cycle      not started" in result.output
+    assert "discovery          not run yet" in result.output
 
     result = runner.invoke(app, ["--data-dir", str(data_dir), "esi", "status"])
     assert result.exit_code == 0, result.output
@@ -204,6 +208,9 @@ def test_status_and_verify_use_the_service(data_dir: Path, service: respx.Router
         r"market_history\s+1\s+34\s+0\s+2\s+0\s+2026-09-01 \.\. 2026-10-04", result.output
     )
     assert "sync:market_history      manual   succeeded  objects=3 rows=600" in result.output
+    assert "entities_backfill" not in result.output  # snapshot archives get their own line
+    assert "entity snapshots   none seeded" in result.output
+    assert "entities           7 characters, 1 corporations, 0 alliances" in result.output
 
     result = runner.invoke(app, ["--data-dir", str(data_dir), "entities", "status"])
     assert result.exit_code == 0 and "characters                                7" in result.output
@@ -292,3 +299,35 @@ def test_live_status_reads_the_service(data_dir: Path, service: respx.Router) ->
     assert "state         following" in result.output
     assert "next 100003600, pointer 100003583" in result.output
     assert "lag 4s" in result.output and "812 objects" in result.output
+
+
+def test_discovery_progress_reads_as_sentences() -> None:
+    from evedw.cli import discovery_lines, snapshot_line
+    from evedw.domain.registry import DatasetSummary
+
+    lines = discovery_lines(
+        {
+            "after": 2124785351,
+            "full_done_at": "2026-10-15T23:13:23+00:00",
+            "full_found": 220634,
+            "full_pages": 18168,
+            "last_run": "2026-10-16T23:15:00+00:00",
+            "new_found": 3791,
+        }
+    )
+    assert lines == [
+        "discovery          last run 2026-10-16 23:15 UTC, 3,791 new characters found past "
+        "the highest id (2124785351)",
+        "full walk          done 2026-10-15 23:13 UTC, 18,168 pages, 220,634 found",
+    ]
+    walking = discovery_lines({"full_pages": 600, "full_found": 0, "full_after": 90771312})
+    assert walking[1].startswith("full walk          600 pages read so far, 0 found")
+    snapshots = DatasetSummary(
+        "entities_backfill",
+        {"imported": 3, "skipped": 1},
+        date(2024, 9, 27),
+        date(2026, 5, 10),
+    )
+    assert snapshot_line(snapshots) == (
+        "entity snapshots   3 seeded (2024-09-27 .. 2026-05-10), 1 unsupported"
+    )
