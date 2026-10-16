@@ -1,6 +1,6 @@
 # EVE Data Warehouse: design
 
-Status: accepted design, 2026-10-05. Supersedes the `../kat` architecture.
+Status: accepted design, 2026-10-05. Supersedes the `../../rust/kat` architecture.
 Implementation milestones live in [plan.md](plan.md). Working rules for
 sessions live in [../CLAUDE.md](../CLAUDE.md).
 

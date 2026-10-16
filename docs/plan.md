@@ -12,7 +12,7 @@ Design decisions are in [design.md](design.md); do not re-decide them here.
 If a milestone reveals the design is wrong, change design.md first, then the
 code.
 
-Where kat code is a useful reference, the path under `../kat/src` is given.
+Where kat code is a useful reference, the path under `../../rust/kat/src` is given.
 Port the behaviour, not the structure.
 
 ## M0. Scaffold and registry

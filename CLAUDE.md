@@ -94,7 +94,7 @@ uv run pytest
 
 ## Reference material
 
-`../kat` is the predecessor Rust project. Its EVE Ref client, ESI policy
+`../../rust/kat` is the predecessor Rust project. Its EVE Ref client, ESI policy
 module and killmail parser tests are worth reading when porting behaviour.
 Its snapshot manifest, disk budget and reporting code are deliberately not
 carried over.
