@@ -802,8 +802,17 @@ the registry's `sweep_state`, so a restart resumes where the slice stopped.
    `EVEDW_ESI_RECENT_DAYS` days, 1,000 per `POST /characters/affiliation`.
 3. Affiliation cycle: every live character in id order, 1,000 per request,
    one pass per `EVEDW_AFFILIATION_CYCLE` (weekly), about 18,000 requests
-   swept as fast as the budget allows, then idle until the next cycle. Per
-   character: Doomheim marks it deleted; a different corporation writes the
+   swept as fast as the budget allows, then idle until the next cycle.
+   After the live characters, the same cycle checks every character stored
+   in Doomheim (deleted, corporation 1000001), about 2,500 more requests
+   (decided 2026-10-16): a biomassed character can be restored, and before,
+   only a killmail brought it back into view. Characters deleted because ESI
+   answered 404 keep their last corporation and are not asked for, since one
+   unknown id fails a whole batch. The cycle state counts the Doomheim pass
+   separately (`doomheim_checked`, `doomheim_changed`). Per
+   character: Doomheim marks it deleted; a restored one (a corporation
+   other than Doomheim for a character marked deleted) is marked live again
+   and queued as a change, which fetches its history; a different corporation writes the
    new affiliation at once and queues a change; a different alliance or
    faction only writes; an unknown character or corporation is queued as a
    change. A `400` batch is retried in tenths until the invalid ids are

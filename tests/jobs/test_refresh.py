@@ -459,8 +459,10 @@ def test_affiliation_cycle_writes_changes_splits_bad_batches_and_finishes(
     )
     refresh = job(client, entities, env)
     refresh.affiliation_cycle_step(env.registry, cancel=lambda: None)
-    # One bad id fails its batch; tenths are retried until it stands alone.
-    assert seen == [[1, 2, 3, 4, 5, 7], [1], [2], [3], [4], [5], [7]]
+    # One bad id fails its batch; tenths are retried until it stands alone. Then the
+    # Doomheim pass checks character 3, biomassed in the live pass; 6 was deleted by a
+    # 404 (it kept its corporation) and is not asked for.
+    assert seen == [[1, 2, 3, 4, 5, 7], [1], [2], [3], [4], [5], [7], [3]]
 
     rows = {r["character_id"]: r for r in entities.lookup("characters", range(1, 8)).to_pylist()}
     assert rows[1]["source"] == "everef_backfill:abc"  # nothing changed, nothing written
@@ -477,6 +479,7 @@ def test_affiliation_cycle_writes_changes_splits_bad_batches_and_finishes(
     }
     state = json.loads(env.registry.state_get(CYCLE_STATE) or "{}")
     assert state["finished_at"] and state["checked"] == 6 and state["changed"] == 4
+    assert state["doomheim_checked"] == 1 and state["doomheim_changed"] == 0
 
     # The cycle is done until it is due again.
     batches = len(seen)
@@ -486,6 +489,33 @@ def test_affiliation_cycle_writes_changes_splits_bad_batches_and_finishes(
     later.now = lambda: TODAY_AT + timedelta(days=8)
     later.affiliation_cycle_step(env.registry, cancel=lambda: None)
     assert len(seen) > batches
+
+
+def test_the_cycle_finds_a_character_brought_back_from_doomheim(
+    env: SyncEnv, entities: EntityStore, esi: tuple[FakeEsi, FakeClock, EsiClient]
+) -> None:
+    fake, _, client = esi
+    seed_corporations(entities, {"corporation_id": 98000001})
+    seed_characters(
+        entities,
+        {"character_id": 1},  # live
+        {"character_id": 8, "corporation_id": 1000001, "deleted": True},  # restored since
+        {"character_id": 9, "corporation_id": 1000001, "deleted": True},  # still biomassed
+        {"character_id": 10, "deleted": True},  # deleted by a 404: never asked for
+    )
+    seen = affiliation_server(
+        fake,
+        {1: (98000001, None), 8: (98000001, None), 9: (1000001, None)},
+        invalid=set(),
+    )
+    job(client, entities, env).affiliation_cycle_step(env.registry, cancel=lambda: None)
+    assert seen == [[1], [8, 9]]
+    rows = {r["character_id"]: r for r in entities.lookup("characters", [8, 9, 10]).to_pylist()}
+    assert rows[8]["deleted"] is False and rows[8]["corporation_id"] == 98000001
+    assert rows[9]["deleted"] is True and rows[10]["deleted"] is True
+    assert queue(env.registry) == {("character", 8): CHANGE}  # its history is fetched
+    state = json.loads(env.registry.state_get(CYCLE_STATE) or "{}")
+    assert (state["checked"], state["doomheim_checked"], state["doomheim_changed"]) == (1, 2, 1)
 
 
 def test_affiliation_of_unknown_and_revived_characters(

@@ -541,7 +541,13 @@ class RefreshJob:
         if started is None or (
             state.get("finished_at") and now >= started + self.affiliation_cycle
         ):
-            state = {"started_at": now.isoformat(), "cursor": None, "checked": 0, "changed": 0}
+            state = {
+                "started_at": now.isoformat(),
+                "phase": "live",
+                "cursor": None,
+                "checked": 0,
+                "changed": 0,
+            }
             _save(registry, CYCLE_STATE, state, now)
             log.info("affiliation cycle started")
         if state.get("finished_at"):
@@ -550,26 +556,49 @@ class RefreshJob:
             cancel()
             self._need(1)
             cursor = state.get("cursor")
+            # Live characters first, then the ones stored in Doomheim: a biomassed
+            # character can be restored, and only an affiliation check notices it unless
+            # it shows up on a killmail. Characters deleted because ESI answered 404 keep
+            # their last corporation and are left out: one unknown id fails a whole batch.
+            doomheim = state.get("phase") == "doomheim"
             batch = self.entities.ids(
                 "characters",
-                live_only=True,
+                live_only=not doomheim,
+                where={"corporation_id": DOOMHEIM} if doomheim else None,
                 after=None if cursor is None else int(cursor),
                 limit=AFFILIATION_BATCH,
             )
+            if not batch and not doomheim:
+                state.update(phase="doomheim", cursor=None)
+                _save(registry, CYCLE_STATE, state, self.now())
+                log.info(
+                    "affiliation cycle: %d live characters checked, %d changed; now Doomheim",
+                    state["checked"],
+                    state["changed"],
+                )
+                continue
             if not batch:
                 state["finished_at"] = self.now().isoformat()
                 _save(registry, CYCLE_STATE, state, self.now())
                 log.info(
-                    "affiliation cycle finished: %d characters checked, %d changed",
+                    "affiliation cycle finished: %d characters checked, %d changed; "
+                    "%d in Doomheim checked, %d back from it",
                     state["checked"],
                     state["changed"],
+                    state.get("doomheim_checked", 0),
+                    state.get("doomheim_changed", 0),
                 )
                 return
             changes_before = self._report.changes
             self._apply_affiliations(registry, self._affiliate(batch))
+            changed = self._report.changes - changes_before
             state["cursor"] = batch[-1]
-            state["checked"] = int(state["checked"]) + len(batch)
-            state["changed"] = int(state["changed"]) + self._report.changes - changes_before
+            if doomheim:
+                state["doomheim_checked"] = int(state.get("doomheim_checked", 0)) + len(batch)
+                state["doomheim_changed"] = int(state.get("doomheim_changed", 0)) + changed
+            else:
+                state["checked"] = int(state["checked"]) + len(batch)
+                state["changed"] = int(state["changed"]) + changed
             _save(registry, CYCLE_STATE, state, self.now())
             self._check_errors()
 
