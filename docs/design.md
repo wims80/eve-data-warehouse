@@ -452,7 +452,18 @@ discover   fetch per-year index.json for the object listing, then HEAD a
            around their 55th request (2026-10-09). A sync of about 55
            requests takes about 30 s; a full killmail sweep is about 7,000
            requests, about an hour. A 429 waits for `Retry-After`, at least 30 seconds,
-           doubling per attempt. A file whose HEAD still fails keeps its
+           doubling per attempt, and the pace adapts (decided 2026-10-18):
+           the wait holds every EVE Ref request of the process, not only the
+           one that was refused, and the spacing doubles once per hold, up
+           to 8 s. It stays slowed for 30 minutes after the last 429, then
+           halves towards `EVEDW_EVEREF_SPACING` at most every 5 minutes.
+           The pace is shared by every EVE Ref job of the service, so the
+           market sync that follows a rate-limited killmail sync starts
+           slow. Before, only the refused request waited, the other HEAD
+           thread kept going, and each new job started at the floor: on
+           2026-10-18 the killmail and market syncs drew a pair of 429s
+           about every 32 s (89 in two days). The pace is not persisted
+           across restarts. A file whose HEAD still fails keeps its
            index metadata for this run, so one file cannot fail discovery;
            measured 2026-10-07, eight concurrent HEADs drew 429s from EVE
            Ref and aborted a killmail sync. Then compare with source_object: new or different ->

@@ -10,8 +10,12 @@ import respx
 from evedw.domain.datasets import MARKET_HISTORY
 from evedw.domain.registry import DiscoveredObject
 from evedw.sources.everef import (
+    MAX_SPACING,
+    RATE_LIMITED_HOLD,
+    RELAX_EVERY,
     DownloadError,
     EveRefClient,
+    Pace,
     UpstreamChangedError,
     normalize_etag,
     parse_timestamp,
@@ -218,9 +222,23 @@ def test_discover_listing_dataset_tries_index_then_html(
     assert all(o.expected_count is None and o.etag is None for o in found)
 
 
-def test_rate_limit_waits_as_asked_and_at_least_the_floor(
-    router: respx.Router, client: EveRefClient, sleeps: list[float]
-) -> None:
+def test_rate_limit_waits_as_asked_and_at_least_the_floor(router: respx.Router) -> None:
+    now = [100.0]
+    sleeps: list[float] = []
+
+    def sleep(seconds: float) -> None:
+        sleeps.append(seconds)
+        now[0] += seconds
+
+    client = EveRefClient(
+        BASE_URL,
+        client=httpx.Client(),
+        attempts=3,
+        backoff_seconds=0.0,
+        sleep=sleep,
+        spacing=0.0,
+        clock=lambda: now[0],
+    )
     url = f"{BASE_URL}/market-history/2026/x.csv.bz2"
     router.head(url).mock(
         side_effect=[
@@ -230,8 +248,47 @@ def test_rate_limit_waits_as_asked_and_at_least_the_floor(
         ]
     )
     assert client._request("HEAD", url) is not None  # pyright: ignore[reportPrivateUsage]
+    client.close()
     # Retry-After 90 on the first attempt; no header on the second: the 30 s floor, doubled.
     assert sleeps == [90.0, 60.0]
+
+
+def test_rate_limit_holds_every_client_sharing_the_pace() -> None:
+    pace = Pace(0.5)
+    slept: list[float] = []
+    pace.rate_limited(100.0, 30.0)
+    pace.rate_limited(100.5, 30.0)  # the other thread's 429 from the same burst
+    assert pace.spacing == 1.0
+    # Another client's next request waits out the hold, then keeps the slower spacing.
+    pace.wait(lambda: 101.0, slept.append)
+    pace.wait(lambda: 130.5, slept.append)
+    assert slept == [29.5, 1.0]
+
+
+def test_rate_limit_doubles_per_hold_up_to_the_max_and_relaxes_after_the_hold() -> None:
+    pace = Pace(0.5)
+    now = 0.0
+    for _ in range(6):
+        pace.rate_limited(now, 30.0)
+        now += 31.0
+    assert pace.spacing == MAX_SPACING
+    last_429 = now - 31.0
+    pace.wait(lambda: last_429 + RATE_LIMITED_HOLD - 1, lambda _: None)
+    assert pace.spacing == MAX_SPACING
+    when = last_429 + RATE_LIMITED_HOLD
+    pace.wait(lambda: when, lambda _: None)
+    assert pace.spacing == MAX_SPACING / 2
+    pace.wait(lambda: when + 1, lambda _: None)  # one halving per RELAX_EVERY
+    assert pace.spacing == MAX_SPACING / 2
+    for step in range(1, 4):
+        pace.wait(lambda s=step: when + s * RELAX_EVERY, lambda _: None)
+    assert pace.spacing == 0.5
+
+
+def test_floor_change_applies_when_calm() -> None:
+    pace = Pace(0.5)
+    EveRefClient(BASE_URL, client=httpx.Client(), spacing=0.0, pace=pace).close()
+    assert pace.spacing == 0.0
 
 
 def test_failed_head_keeps_index_metadata_instead_of_failing(

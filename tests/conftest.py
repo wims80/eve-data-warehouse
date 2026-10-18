@@ -5,6 +5,8 @@ from pathlib import Path
 import pytest
 
 from evedw.config import Settings
+from evedw.jobs import catalog
+from evedw.sources.everef import Pace
 from evedw.store import open_entity_store, open_registry, open_response_cache
 from evedw.store.base import EntityStore, Registry, ResponseCache
 from tests.store.memory import MemoryEntityStore, MemoryRegistry, MemoryResponseCache
@@ -32,6 +34,12 @@ def _isolated_home(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """The CLI reads ``.env`` from the project home, which is this checkout unless
     ``EVEDW_HOME`` says otherwise; the real one must never reach a test."""
     monkeypatch.setenv("EVEDW_HOME", str(tmp_path))
+
+
+@pytest.fixture(autouse=True)
+def _fresh_everef_pace(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The process-wide EVE Ref pace must not carry one test's 429 hold into the next."""
+    monkeypatch.setattr(catalog, "EVEREF_PACE", Pace())
 
 
 @pytest.fixture

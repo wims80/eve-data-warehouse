@@ -31,6 +31,7 @@ from evedw.jobs.verify import VerifyJob
 from evedw.sources.esi import EsiClient
 from evedw.sources.evekill import PROCESS_GATE as EVEKILL_GATE
 from evedw.sources.evekill import EveKillClient
+from evedw.sources.everef import PROCESS_PACE as EVEREF_PACE
 from evedw.sources.everef import EveRefClient
 from evedw.sources.zkillboard import PROCESS_GATE, ZKillboardClient
 from evedw.store import open_response_cache
@@ -250,12 +251,14 @@ class JobCatalog:
         )
 
     def _everef(self) -> EveRefClient:
-        """Listings are revalidated against the store's response cache (design §6)."""
+        """Listings are revalidated against the store's response cache (design §6); the
+        pace is the process's, so a 429 slows every later EVE Ref job too."""
         return EveRefClient(
             self.settings.everef_base_url,
             contact=self.settings.esi_contact,
             cache=open_response_cache(self.settings),
             spacing=self.settings.everef_spacing,
+            pace=EVEREF_PACE,
         )
 
     def _esi(self) -> EsiClient:

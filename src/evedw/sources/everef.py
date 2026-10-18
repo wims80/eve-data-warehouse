@@ -43,6 +43,75 @@ CONCURRENCY = 2
 SPACING = 0.5
 """Least seconds between request starts, across threads. At full speed a sync's ~55 requests
 drew 429s from EVE Ref's Cloudflare front around the 55th (2026-10-09)."""
+MAX_SPACING = 8.0
+"""The slowest the pace adapts to after 429s, in seconds between request starts."""
+RATE_LIMITED_HOLD = 1800.0
+"""After a 429 the spacing does not relax for this long. On 2026-10-18 the pace went straight
+back to the floor after each 30 s wait and drew the next 429 within a few requests."""
+RELAX_EVERY = 300.0
+"""Once the hold is over, the spacing halves towards the floor at most this often."""
+
+
+class Pace:
+    """Request starts for every EVE Ref client of a process: at least ``spacing`` apart,
+    across threads and clients. A 429 holds every start until the wait it asks for has
+    passed and doubles the spacing, at most once per hold, up to ``MAX_SPACING``; the
+    spacing halves back towards the floor only after ``RATE_LIMITED_HOLD``."""
+
+    def __init__(self, floor: float = SPACING) -> None:
+        self.floor = floor
+        """Spacing when calm; each client sets it from its configuration."""
+        self._slowed = 0.0
+        """Spacing forced by 429s, or 0 when calm."""
+        self._next_start = 0.0
+        self._held_until = 0.0
+        self._rate_limited_at: float | None = None
+        self._paced_at = 0.0
+        self._lock = threading.Lock()
+
+    @property
+    def spacing(self) -> float:
+        return max(self.floor, self._slowed)
+
+    def wait(self, clock: Callable[[], float], sleep: Callable[[float], None]) -> None:
+        """Wait for this request's start slot. The slot is taken under the lock and waited
+        for outside it."""
+        with self._lock:
+            now = clock()
+            self._relax(now)
+            start = max(now, self._next_start)
+            self._next_start = start + self.spacing
+        if start > now:
+            sleep(start - now)
+
+    def rate_limited(self, now: float, wait: float) -> None:
+        """A 429: no request starts for ``wait`` seconds, and the spacing doubles unless
+        this 429 arrived during the hold an earlier one set."""
+        with self._lock:
+            if now >= self._held_until and self.spacing < MAX_SPACING:
+                self._slowed = min(MAX_SPACING, max(self.spacing * 2, SPACING))
+                self._paced_at = now
+                log.warning("EVE Ref pace slowed to %.2fs between requests", self.spacing)
+            self._rate_limited_at = now
+            self._held_until = max(self._held_until, now + wait)
+            self._next_start = max(self._next_start, self._held_until)
+
+    def _relax(self, now: float) -> None:
+        if (
+            self._slowed > self.floor
+            and self._rate_limited_at is not None
+            and now - self._rate_limited_at >= RATE_LIMITED_HOLD
+            and now - self._paced_at >= RELAX_EVERY
+        ):
+            self._slowed /= 2
+            if self._slowed <= self.floor:
+                self._slowed = 0.0
+            self._paced_at = now
+            log.info("EVE Ref pace relaxed to %.2fs between requests", self.spacing)
+
+
+PROCESS_PACE = Pace()
+"""Shared by the service's EVE Ref clients, so one sync's 429 slows the next sync too."""
 
 
 class UpstreamChangedError(RuntimeError):
@@ -242,8 +311,10 @@ class EveRefClient:
         cache: ResponseCache | None = None,
         spacing: float = SPACING,
         clock: Callable[[], float] = time.monotonic,
+        pace: Pace | None = None,
     ) -> None:
-        """``cache`` keeps listing bodies for conditional GETs; the client closes it."""
+        """``cache`` keeps listing bodies for conditional GETs; the client closes it.
+        ``pace`` is shared with other clients; ``spacing`` sets its floor."""
         self.base_url = base_url.rstrip("/")
         self._owns_client = client is None
         self._client = client or httpx.Client(
@@ -259,8 +330,11 @@ class EveRefClient:
         self._traffic_lock = threading.Lock()
         self._spacing = spacing
         self._clock = clock
-        self._next_start = 0.0
-        self._pace_lock = threading.Lock()
+        if pace is None:
+            pace = Pace(spacing)
+        else:
+            pace.floor = spacing
+        self.pace = pace
 
     def close(self) -> None:
         if self._owns_client:
@@ -274,14 +348,7 @@ class EveRefClient:
             return self._traffic
 
     def _pace(self) -> None:
-        """Wait for this request's start slot: one every ``spacing`` seconds, whichever
-        thread asks. The slot is taken under the lock and waited for outside it."""
-        with self._pace_lock:
-            now = self._clock()
-            start = max(now, self._next_start)
-            self._next_start = start + self._spacing
-        if start > now:
-            self._sleep(start - now)
+        self.pace.wait(self._clock, self._sleep)
 
     def _count(self, **fields: int) -> None:
         with self._traffic_lock:
@@ -607,10 +674,16 @@ class EveRefClient:
         if attempt + 1 >= self._attempts:
             return
         delay = self._backoff * (2**attempt) + random.uniform(0, self._backoff)
-        if isinstance(exc, _Retryable) and exc.retry_after is not None:
+        retry_after = exc.retry_after if isinstance(exc, _Retryable) else None
+        if retry_after is not None:
             # Rate limited: wait at least what the server asks, longer on each attempt.
-            delay = max(delay, exc.retry_after * (2**attempt))
+            delay = max(delay, retry_after * (2**attempt))
         log.warning(
             "retrying %s after %s (attempt %d, sleeping %.1fs)", url, exc, attempt + 1, delay
         )
-        self._sleep(delay)
+        if retry_after is not None:
+            # Every thread and client holds, not only this request; the retry's own start
+            # slot does the waiting.
+            self.pace.rate_limited(self._clock(), delay)
+        else:
+            self._sleep(delay)
