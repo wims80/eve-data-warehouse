@@ -65,6 +65,8 @@ class Pace:
         """Spacing forced by 429s, or 0 when calm."""
         self._next_start = 0.0
         self._held_until = 0.0
+        self._holds = 0
+        """Counts 429s, so a slot taken before one is not used after it."""
         self._rate_limited_at: float | None = None
         self._paced_at = 0.0
         self._lock = threading.Lock()
@@ -75,14 +77,19 @@ class Pace:
 
     def wait(self, clock: Callable[[], float], sleep: Callable[[float], None]) -> None:
         """Wait for this request's start slot. The slot is taken under the lock and waited
-        for outside it."""
-        with self._lock:
-            now = clock()
-            self._relax(now)
-            start = max(now, self._next_start)
-            self._next_start = start + self.spacing
-        if start > now:
-            sleep(start - now)
+        for outside it; a 429 that arrives meanwhile voids it, and a new one is taken."""
+        while True:
+            with self._lock:
+                now = clock()
+                self._relax(now)
+                start = max(now, self._next_start)
+                self._next_start = start + self.spacing
+                holds = self._holds
+            if start > now:
+                sleep(start - now)
+            with self._lock:
+                if self._holds == holds:
+                    return
 
     def rate_limited(self, now: float, wait: float) -> None:
         """A 429: no request starts for ``wait`` seconds, and the spacing doubles unless
@@ -93,6 +100,7 @@ class Pace:
                 self._paced_at = now
                 log.warning("EVE Ref pace slowed to %.2fs between requests", self.spacing)
             self._rate_limited_at = now
+            self._holds += 1
             self._held_until = max(self._held_until, now + wait)
             self._next_start = max(self._next_start, self._held_until)
 

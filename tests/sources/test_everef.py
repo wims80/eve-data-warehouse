@@ -265,6 +265,23 @@ def test_rate_limit_holds_every_client_sharing_the_pace() -> None:
     assert slept == [29.5, 1.0]
 
 
+def test_slot_taken_before_a_429_waits_for_its_hold() -> None:
+    pace = Pace(2.0)
+    now = [100.0]
+    slept: list[float] = []
+    pace.wait(lambda: now[0], slept.append)  # thread A starts at 100
+
+    def sleep_while_a_is_refused(seconds: float) -> None:
+        # Thread B sleeps for its slot at 102; A's 429 arrives at 101 and holds 30 s.
+        slept.append(seconds)
+        if len(slept) == 1:
+            pace.rate_limited(101.0, 30.0)
+        now[0] += seconds
+
+    pace.wait(lambda: now[0], sleep_while_a_is_refused)
+    assert slept == [2.0, 29.0]  # B starts at 131, when the hold ends, not at 102
+
+
 def test_rate_limit_doubles_per_hold_up_to_the_max_and_relaxes_after_the_hold() -> None:
     pace = Pace(0.5)
     now = 0.0
