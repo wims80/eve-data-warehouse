@@ -479,7 +479,13 @@ discover   fetch per-year index.json for the object listing, then HEAD a
            Cloudflare front weakens the ETag (`W/"..."`) of a body it
            compresses and then ignores the weak form, so the strong form is
            sent; the tag is the file's content hash (checked 2026-10-09: the
-           weak tag drew a 200, the strong tag and the date each a 304). Every
+           weak tag drew a 200, the strong tag and the date each a 304).
+           Since 2026-10-18 about 06:00 UTC EVE Ref answers 200 even to the
+           strong tag (`cf-cache-status: DYNAMIC`), so a listing also counts
+           as unchanged when a 200 brings exactly the cached body (decided
+           2026-10-18); without that every listing looked changed, every
+           lagging entry was HEADed again on every sync (42 to 121 HEADs),
+           and the syncs drew 429s. Every
            year is still read on every sync; an unchanged one costs a
            request but no download (a killmail year's index is about
            117 KB). An entry of an unchanged listing that still differs
@@ -488,8 +494,8 @@ discover   fetch per-year index.json for the object listing, then HEAD a
            takes the registry's file metadata instead of another HEAD;
            before, about 30 such killmail days were HEADed on every sync.
            A listing that answers 404 drops its cached body. Each
-           sync logs `EVE Ref traffic: N listing requests (M answered 304),
-           H HEADs, D downloads` (`zKillboard traffic: ...` for zKillboard
+           sync logs `EVE Ref traffic: N listing requests (M answered 304,
+           U unchanged 200), H HEADs, D downloads` (`zKillboard traffic: ...` for zKillboard
            syncs since 2026-10-12). Measured over 12 scheduled syncs,
            2026-10-09 22:12 to 2026-10-11 05:00 UTC: killmails 20 or 21 of
            21 listings answered 304, market history 22 or 23 of 25 (the

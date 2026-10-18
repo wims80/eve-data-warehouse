@@ -90,6 +90,8 @@ class FakeEveRef:
         self.listing_modified: dict[str, str] = {}
         """Last-Modified per listing path; a fixed date unless set."""
         self.missing_years: set[int] = set()
+        self.ignore_validators = False
+        """Answer 200 to every conditional listing GET, as EVE Ref does since 2026-10-18."""
         router.route(method__in=["GET", "HEAD"], url__regex=rf"{base_url}/{self.prefix}/.*").mock(
             side_effect=self._handle
         )
@@ -170,9 +172,12 @@ class FakeEveRef:
         etag = f'"{md5(body)}"'
         modified = self.listing_modified.get(request.url.path, "Mon, 05 Oct 2026 12:00:00 GMT")
         headers = {"ETag": f"W/{etag}", "Last-Modified": modified}
-        if request.headers.get("If-None-Match") == etag or (
-            "If-None-Match" not in request.headers
-            and request.headers.get("If-Modified-Since") == modified
+        if not self.ignore_validators and (
+            request.headers.get("If-None-Match") == etag
+            or (
+                "If-None-Match" not in request.headers
+                and request.headers.get("If-Modified-Since") == modified
+            )
         ):
             self.not_modified[f"{request.method} {request.url.path}"] += 1
             return httpx.Response(304, headers={"ETag": etag})

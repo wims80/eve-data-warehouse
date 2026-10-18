@@ -93,8 +93,9 @@ class DiscoveredObject:
     last_modified: datetime | None
     expected_count: int | None
     listing_unchanged: bool = False
-    """Its listing answered 304: the entry is what the previous sync saw, so a difference
-    from the registry was already checked by HEAD then. Not stored."""
+    """Its listing is unchanged (a 304, or the same body as last time): the entry is what
+    the previous sync saw, so a difference from the registry was already checked by HEAD
+    then. Not stored."""
 
 
 @dataclass(frozen=True, slots=True)

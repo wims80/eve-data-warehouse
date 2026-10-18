@@ -63,7 +63,8 @@ def test_an_unchanged_sync_revalidates_every_listing_and_downloads_none(
     assert env.fake.requests("GET", suffix=".csv.bz2") == before_files
     line = next(r.getMessage() for r in caplog.records if "EVE Ref traffic" in r.getMessage())
     assert line == (
-        f"EVE Ref traffic: {years + 1} listing requests ({years + 1} answered 304), "
+        f"EVE Ref traffic: {years + 1} listing requests ({years + 1} answered 304, "
+        "0 unchanged 200), "
         "3 HEADs, 0 downloads"
     )
 
@@ -117,3 +118,31 @@ def test_an_index_that_lags_its_file_is_checked_once_per_change_of_the_listing(
     env.fake.put(later, market_csv_bz2(later, rows=50), expected=50)
     env.sync()
     assert env.fake.hits[head] == first + 1
+
+
+def test_a_listing_answered_200_with_the_same_body_is_unchanged(
+    cached: tuple[SyncEnv, MemoryCache], caplog: pytest.LogCaptureFixture
+) -> None:
+    env, _ = cached
+    env.fake.ignore_validators = True  # EVE Ref since 2026-10-18
+    old = TODAY - timedelta(days=400)  # outside the header window
+    env.fake.put(old, market_csv_bz2(old, rows=100), expected=100)
+    env.fake.stale_index[old] = market_csv_bz2(old, rows=90)  # the index lags the file
+    head = f"HEAD /market-history/{old.year}/{market_name(old)}"
+    env.sync()
+    assert env.fake.hits[head] == 1
+
+    with caplog.at_level(logging.INFO, logger="evedw.jobs.sync"):
+        env.sync()  # every listing a 200, each with the body cached last time
+    assert env.fake.hits[head] == 1
+    assert not env.fake.not_modified
+    years = len(list(MARKET_HISTORY.years(TODAY)))
+    line = next(r.getMessage() for r in caplog.records if "EVE Ref traffic" in r.getMessage())
+    assert line.startswith(
+        f"EVE Ref traffic: {years + 1} listing requests (0 answered 304, {years + 1} unchanged 200)"
+    )
+
+    later = old + timedelta(days=1)  # the year's listing changes
+    env.fake.put(later, market_csv_bz2(later, rows=50), expected=50)
+    env.sync()
+    assert env.fake.hits[head] == 2

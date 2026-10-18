@@ -218,7 +218,7 @@ class SyncJob:
             ):
                 selected.append(index)
             elif known.differs_from(obj):
-                # The listing answered 304, so this lagging entry is the one the last
+                # The listing is unchanged, so this lagging entry is the one the last
                 # changed listing showed, and HEAD checked the file then: the registry holds
                 # what the file said, which is what a HEAD would say now.
                 found[index] = replace(

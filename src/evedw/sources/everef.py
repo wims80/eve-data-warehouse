@@ -163,6 +163,8 @@ class Traffic:
     """Listing GETs: year indexes, totals, directory pages."""
     not_modified: int = 0
     """Listing GETs answered 304, whose cached body was reused."""
+    same_body: int = 0
+    """Listing GETs answered 200 with the cached body unchanged."""
     heads: int = 0
     downloads: int = 0
     """File GETs, retries included."""
@@ -171,13 +173,15 @@ class Traffic:
         return Traffic(
             self.listings - earlier.listings,
             self.not_modified - earlier.not_modified,
+            self.same_body - earlier.same_body,
             self.heads - earlier.heads,
             self.downloads - earlier.downloads,
         )
 
     def describe(self) -> str:
         return (
-            f"{self.listings} listing requests ({self.not_modified} answered 304), "
+            f"{self.listings} listing requests ({self.not_modified} answered 304, "
+            f"{self.same_body} unchanged 200), "
             f"{self.heads} HEADs, {self.downloads} downloads"
         )
 
@@ -609,8 +613,10 @@ class EveRefClient:
     # -- http ----------------------------------------------------------------------------
 
     def _listing(self, url: str) -> tuple[str, bool] | None:
-        """A listing body and whether it was answered 304, or ``None`` on 404. With a cache
-        the GET is conditional and a ``304`` returns the cached body."""
+        """A listing body and whether it is unchanged since the last fetch, or ``None`` on
+        404. With a cache the GET is conditional and a ``304`` returns the cached body; a
+        ``200`` whose body equals the cached one is unchanged too, because since 2026-10-18
+        EVE Ref answers 200 to a matching ``If-None-Match``."""
         key = listing_key(url)
         cached = self._cache.get(key) if self._cache is not None else None
         headers: dict[str, str] = {}
@@ -633,6 +639,9 @@ class EveRefClient:
             self._count(not_modified=1)
             return cached.body, True
         text = response.text
+        unchanged = cached is not None and cached.body == text
+        if unchanged:
+            self._count(same_body=1)
         if self._cache is not None:
             now = datetime.now(UTC)
             self._cache.put(
@@ -647,7 +656,7 @@ class EveRefClient:
                     expires_at=now,  # always revalidated
                 )
             )
-        return text, False
+        return text, unchanged
 
     def _request(
         self,
