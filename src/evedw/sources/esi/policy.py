@@ -122,6 +122,28 @@ def header(headers: Mapping[str, str], name: str) -> str | None:
     return None
 
 
+RATE_LIMIT_HEADERS = (
+    "retry-after",
+    "x-ratelimit-group",
+    "x-ratelimit-limit",
+    "x-ratelimit-remaining",
+    "x-ratelimit-used",
+    LEGACY_ERROR_REMAIN,
+    LEGACY_ERROR_RESET,
+)
+
+
+def describe_limits(headers: Mapping[str, str]) -> str:
+    """The rate-limit headers of a response, for the log. A 429 from the deeper limiter in
+    EVE's server code carries none of them (design §11)."""
+    found = [
+        f"{name}: {value}"
+        for name in RATE_LIMIT_HEADERS
+        if (value := header(headers, name)) is not None
+    ]
+    return ", ".join(found) if found else "no rate-limit headers"
+
+
 def number(headers: Mapping[str, str], name: str) -> int | None:
     value = header(headers, name)
     if value is None:

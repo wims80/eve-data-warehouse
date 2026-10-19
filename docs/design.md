@@ -1221,7 +1221,16 @@ Binding for every ESI request made by this project, including ad hoc scripts.
   the legacy `X-ESI-Error-Limit-Remain/Reset` headers. Reserve bucket units
   before sending, pause a full window when a bucket is near exhaustion,
   pause a minute on a malformed or negative legacy header, an hour on an
-  unparseable limit. Honour `Retry-After` as seconds or a date. The whole
+  unparseable limit. Honour `Retry-After` as seconds or a date; a 429
+  without it holds a minute. A retried 429 logs the rate-limit headers it
+  carried (or `no rate-limit headers`) and the pause actually taken, the
+  longest of the backoff and what the headers asked (decided 2026-10-20;
+  before, the log showed only the backoff). Checked 2026-10-20 against the
+  spec for compatibility date 2026-08-18, the newest: of our routes only
+  `/status` has an `x-rate-limit` group (600 tokens per 15 minutes), and in
+  4.3 million requests no other group was ever sent, so the occasional 429
+  on `/characters/{id}/corporationhistory` (three on 2026-10-19) comes from
+  the deeper limiter in EVE's server code. The whole
   state is written to `data/esi/policy.json` after every change, so a
   restart does not reset a cooldown.
 - A 420 or a 403 sets `stopped` with the reason; every later request raises

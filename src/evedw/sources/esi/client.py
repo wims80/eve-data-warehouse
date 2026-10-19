@@ -24,6 +24,7 @@ import httpx
 from evedw.sources.esi.policy import (
     STATUS_EVERY,
     Policy,
+    describe_limits,
     header,
     http_date,
     number,
@@ -385,6 +386,8 @@ class EsiClient:
                 break
             if status in RETRY_STATUS or status >= 500:
                 last_error = f"HTTP {status}"
+                if status == 429:
+                    last_error += f" ({describe_limits(response_headers)})"
                 self._back_off(attempt, route, last_error)
                 continue
             self._save_policy()
@@ -460,15 +463,17 @@ class EsiClient:
 
     def _back_off(self, attempt: int, route: str, reason: str) -> None:
         delay = (1 << min(attempt, 5)) + random.randint(0, 2)
-        self._policy.blocked_until = max(self._policy.blocked_until, self._now() + delay)
+        now = self._now()
+        self._policy.blocked_until = max(self._policy.blocked_until, now + delay)
         self._save_policy()
+        # The pause is the longest of the backoff and what the response's headers asked for.
         log.warning(
             "ESI %s: %s (attempt %d of %d), pausing %ds",
             route,
             reason,
             attempt + 1,
             self._attempts,
-            delay,
+            self._policy.blocked_until - now,
         )
 
     @staticmethod

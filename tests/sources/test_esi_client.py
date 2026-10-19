@@ -1,6 +1,7 @@
 """The ESI client against a fake server: caching, conditional requests, pacing, stops."""
 
 import json
+import logging
 from collections.abc import Iterator
 from datetime import UTC, datetime
 from pathlib import Path
@@ -177,6 +178,20 @@ def test_retry_after_is_honoured_then_request_succeeds(
     assert clock.now - start >= 7
     assert fake.hits["GET /alliances/1"] == 2
     assert client.policy.retries == 1
+
+
+def test_a_429_logs_its_rate_limit_headers_and_the_real_pause(
+    fake: FakeEsi, client: EsiClient, caplog: pytest.LogCaptureFixture
+) -> None:
+    fake.put("/alliances/1", {"name": "A"})
+    fake.queue("/alliances/1", 429, {}, headers={"Retry-After": "7"})
+    fake.queue("/alliances/1", 429, {})  # the deeper limiter: no headers at all
+    with caplog.at_level(logging.WARNING, logger="evedw.sources.esi.client"):
+        assert client.get("/alliances/1").status == 200
+    retries = [r.getMessage() for r in caplog.records if "attempt" in r.getMessage()]
+    assert "HTTP 429 (retry-after: 7)" in retries[0] and "pausing 8s" in retries[0]
+    # Without Retry-After the client holds a minute, longer than the backoff it would log.
+    assert "HTTP 429 (no rate-limit headers)" in retries[1] and "pausing 60s" in retries[1]
 
 
 def test_transient_failures_stop_after_five_attempts_and_persist_cooldown(
