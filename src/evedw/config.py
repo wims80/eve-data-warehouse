@@ -42,7 +42,7 @@ class Settings(BaseSettings):
     """Killmail days scanned for entity IDs when the refresh queue is populated."""
 
     everef_base_url: str = "https://data.everef.net"
-    everef_spacing: float = 0.5
+    everef_spacing: float = 4.0
     """Least seconds between EVE Ref request starts (design §6)."""
     zkillboard_base_url: str = "https://r2z2.zkillboard.com"
     zkillboard_spacing: float = 0.2

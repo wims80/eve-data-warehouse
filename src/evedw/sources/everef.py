@@ -40,9 +40,10 @@ RATE_LIMITED_WAIT = 30.0
 """Least wait after a 429 without a usable ``Retry-After``, doubled per attempt."""
 CONCURRENCY = 2
 """Requests in flight at once. EVE Ref's download guide uses ``rclone --checkers 2``."""
-SPACING = 0.5
+SPACING = 4.0
 """Least seconds between request starts, across threads. At full speed a sync's ~55 requests
-drew 429s from EVE Ref's Cloudflare front around the 55th (2026-10-09)."""
+drew 429s from EVE Ref's Cloudflare front around the 55th (2026-10-09); since 2026-10-18 a
+0.5 s or 2 s start draws one within about 25 requests, a 4 s start none."""
 MAX_SPACING = 8.0
 """The slowest the pace adapts to after 429s, in seconds between request starts."""
 RATE_LIMITED_HOLD = 1800.0
@@ -96,7 +97,7 @@ class Pace:
         this 429 arrived during the hold an earlier one set."""
         with self._lock:
             if now >= self._held_until and self.spacing < MAX_SPACING:
-                self._slowed = min(MAX_SPACING, max(self.spacing * 2, SPACING))
+                self._slowed = min(MAX_SPACING, self.spacing * 2 or SPACING)
                 self._paced_at = now
                 log.warning("EVE Ref pace slowed to %.2fs between requests", self.spacing)
             self._rate_limited_at = now
@@ -105,17 +106,20 @@ class Pace:
             self._next_start = max(self._next_start, self._held_until)
 
     def _relax(self, now: float) -> None:
-        if (
-            self._slowed > self.floor
-            and self._rate_limited_at is not None
-            and now - self._rate_limited_at >= RATE_LIMITED_HOLD
-            and now - self._paced_at >= RELAX_EVERY
-        ):
+        """Halve the spacing for every ``RELAX_EVERY`` past the hold. It runs only when a
+        request asks for a slot, so a quiet stretch takes every halving due during it."""
+        if self._slowed <= self.floor or self._rate_limited_at is None:
+            return
+        due = max(self._rate_limited_at + RATE_LIMITED_HOLD, self._paced_at + RELAX_EVERY)
+        if now < due:
+            return
+        while self._slowed > self.floor and now >= due:
             self._slowed /= 2
-            if self._slowed <= self.floor:
-                self._slowed = 0.0
-            self._paced_at = now
-            log.info("EVE Ref pace relaxed to %.2fs between requests", self.spacing)
+            self._paced_at = due
+            due += RELAX_EVERY
+        if self._slowed <= self.floor:
+            self._slowed = 0.0
+        log.info("EVE Ref pace relaxed to %.2fs between requests", self.spacing)
 
 
 PROCESS_PACE = Pace()

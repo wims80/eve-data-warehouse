@@ -447,16 +447,25 @@ discover   fetch per-year index.json for the object listing, then HEAD a
            on a sweep every object.
            HEADs run two at a time, as EVE Ref's download guide does
            (`rclone --checkers 2`), and every EVE Ref request starts at
-           least `EVEDW_EVEREF_SPACING` (0.5 s) after the previous one,
-           across both: at full speed two back-to-back syncs drew 429s
-           around their 55th request (2026-10-09). A sync of about 55
-           requests takes about 30 s; a full killmail sweep is about 7,000
-           requests, about an hour. A 429 waits for `Retry-After`, at least 30 seconds,
+           least `EVEDW_EVEREF_SPACING` (4 s; 0.5 s until 2026-10-19)
+           after the previous one, across both: at full speed two
+           back-to-back syncs drew 429s around their 55th request
+           (2026-10-09). Since 2026-10-18 EVE Ref allows far less, about 20
+           to 25 requests a minute or two, and counts recent requests
+           against it: on 2026-10-19 a sync starting at 0.5 s or 2 s drew a
+           429 within about 25 requests, 4 s right after a hold within 5,
+           while a 4 s start after a quiet stretch (54 requests) and 8 s
+           (about 135 requests over two syncs) drew none. A sync of about
+           55 requests takes about 4 minutes; a full killmail sweep is
+           about 7,000 requests, about 8 hours. A 429 waits for `Retry-After`, at least 30 seconds,
            doubling per attempt, and the pace adapts (decided 2026-10-18):
            the wait holds every EVE Ref request of the process, not only the
            one that was refused, and the spacing doubles once per hold, up
            to 8 s. It stays slowed for 30 minutes after the last 429, then
-           halves towards `EVEDW_EVEREF_SPACING` at most every 5 minutes.
+           halves towards `EVEDW_EVEREF_SPACING` every 5 minutes; the
+           halvings due during a quiet stretch are all taken by its next
+           request (until 2026-10-19 only one was, so six hours after a 429
+           a sync still started at 2 s).
            The pace is shared by every EVE Ref job of the service, so the
            market sync that follows a rate-limited killmail sync starts
            slow. Before, only the refused request waited, the other HEAD

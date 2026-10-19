@@ -302,6 +302,16 @@ def test_rate_limit_doubles_per_hold_up_to_the_max_and_relaxes_after_the_hold() 
     assert pace.spacing == 0.5
 
 
+def test_a_quiet_stretch_takes_every_halving_due_during_it() -> None:
+    pace = Pace(0.5)
+    for step in range(4):  # 1, 2, 4, 8 s
+        pace.rate_limited(step * 31.0, 30.0)
+    assert pace.spacing == MAX_SPACING
+    # Six hours without a request: the next one finds the pace back at the floor.
+    pace.wait(lambda: 93.0 + 6 * 3600, lambda _: None)
+    assert pace.spacing == 0.5
+
+
 def test_floor_change_applies_when_calm() -> None:
     pace = Pace(0.5)
     EveRefClient(BASE_URL, client=httpx.Client(), spacing=0.0, pace=pace).close()
