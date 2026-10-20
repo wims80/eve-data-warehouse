@@ -249,8 +249,42 @@ def test_rate_limit_waits_as_asked_and_at_least_the_floor(router: respx.Router) 
     )
     assert client._request("HEAD", url) is not None  # pyright: ignore[reportPrivateUsage]
     client.close()
-    # Retry-After 90 on the first attempt; no header on the second: the 30 s floor, doubled.
-    assert sleeps == [90.0, 60.0]
+    # Retry-After 90 is below the 120 s floor; no header on the second: the floor, doubled.
+    assert sleeps == [120.0, 240.0]
+
+
+def test_rate_limit_waits_grow_to_the_cap_unless_retry_after_asks_for_more(
+    router: respx.Router,
+) -> None:
+    now = [100.0]
+    sleeps: list[float] = []
+
+    def sleep(seconds: float) -> None:
+        sleeps.append(seconds)
+        now[0] += seconds
+
+    client = EveRefClient(
+        BASE_URL,
+        client=httpx.Client(),
+        attempts=5,
+        backoff_seconds=0.0,
+        sleep=sleep,
+        spacing=0.0,
+        clock=lambda: now[0],
+    )
+    url = f"{BASE_URL}/market-history/2026/x.csv.bz2"
+    router.head(url).mock(
+        side_effect=[
+            httpx.Response(429),
+            httpx.Response(429),
+            httpx.Response(429),
+            httpx.Response(429, headers={"Retry-After": "900"}),
+            httpx.Response(200, headers={"ETag": '"e"'}),
+        ]
+    )
+    assert client._request("HEAD", url) is not None  # pyright: ignore[reportPrivateUsage]
+    client.close()
+    assert sleeps == [120.0, 240.0, 480.0, 900.0]
 
 
 def test_rate_limit_holds_every_client_sharing_the_pace() -> None:

@@ -457,8 +457,11 @@ discover   fetch per-year index.json for the object listing, then HEAD a
            while a 4 s start after a quiet stretch (54 requests) and 8 s
            (about 135 requests over two syncs) drew none. A sync of about
            55 requests takes about 4 minutes; a full killmail sweep is
-           about 7,000 requests, about 8 hours. A 429 waits for `Retry-After`, at least 30 seconds,
-           doubling per attempt, and the pace adapts (decided 2026-10-18):
+           about 7,000 requests, about 8 hours. A 429 waits for `Retry-After`, at least 120 seconds,
+           doubling per attempt up to 10 minutes (30 seconds until
+           2026-10-20: EVE Ref sends no `Retry-After`, and on 2026-10-20 the
+           retry after 30 s, and the next request after 60 s at the 8 s
+           pace, each drew another 429), and the pace adapts (decided 2026-10-18):
            the wait holds every EVE Ref request of the process, not only the
            one that was refused, and the spacing doubles once per hold, up
            to 8 s. It stays slowed for 30 minutes after the last 429, then

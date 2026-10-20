@@ -327,7 +327,8 @@ journalctl --user -u evedw -o cat | /usr/bin/grep "zKillboard traffic" | tail
 
 Requests start at least `EVEDW_EVEREF_SPACING` (4 s) apart, two in
 flight at most. A `429` from EVE Ref's Cloudflare front is retried after
-`Retry-After`, at least 30 seconds, doubling per attempt; it holds every
+`Retry-After`, at least 120 seconds, doubling per attempt up to 10
+minutes; it holds every
 EVE Ref request of the service and doubles the spacing, up to 8 s, for at
 least 30 minutes (`EVE Ref pace slowed to` / `relaxed to` in the journal).
 

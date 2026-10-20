@@ -36,8 +36,12 @@ from evedw.store.base import CachedResponse, ResponseCache
 log = logging.getLogger(__name__)
 
 RETRY_STATUS = frozenset({408, 429, 500, 502, 503, 504})
-RATE_LIMITED_WAIT = 30.0
-"""Least wait after a 429 without a usable ``Retry-After``, doubled per attempt."""
+RATE_LIMITED_WAIT = 120.0
+"""Least wait after a 429 without a usable ``Retry-After``, doubled per attempt up to
+``MAX_RATE_LIMITED_WAIT``. 30 s until 2026-10-20: EVE Ref sends no ``Retry-After``, and
+after 30 s its allowance had often not refilled, so the retry drew the next 429."""
+MAX_RATE_LIMITED_WAIT = 600.0
+"""Longest wait between attempts after a 429, unless ``Retry-After`` asks for more."""
 CONCURRENCY = 2
 """Requests in flight at once. EVE Ref's download guide uses ``rclone --checkers 2``."""
 SPACING = 4.0
@@ -698,7 +702,7 @@ class EveRefClient:
         retry_after = exc.retry_after if isinstance(exc, _Retryable) else None
         if retry_after is not None:
             # Rate limited: wait at least what the server asks, longer on each attempt.
-            delay = max(delay, retry_after * (2**attempt))
+            delay = max(delay, retry_after, min(retry_after * (2**attempt), MAX_RATE_LIMITED_WAIT))
         log.warning(
             "retrying %s after %s (attempt %d, sleeping %.1fs)", url, exc, attempt + 1, delay
         )
