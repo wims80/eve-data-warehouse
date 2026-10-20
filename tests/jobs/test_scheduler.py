@@ -88,6 +88,18 @@ async def _never() -> ImportRun | None:
     raise AssertionError("submit must not be called")
 
 
+def test_restarts_do_not_push_back_a_deferred_job_that_never_ran(registry: Registry) -> None:
+    def seed_at(now: datetime) -> ScheduledJob:
+        job = ScheduledJob("sync:killmails", timedelta(days=7), {"sweep": True}, defer_first=True)
+        Scheduler([job], lambda _job: _never(), now=Clock(now)).seed(registry)
+        return job
+
+    assert seed_at(T0).next_due == T0 + timedelta(days=7)
+    # Restarted a day later, and again after the week has passed: still due on schedule.
+    assert seed_at(T0 + timedelta(days=1)).next_due == T0 + timedelta(days=7)
+    assert seed_at(T0 + timedelta(days=9)).next_due == T0 + timedelta(days=9)
+
+
 def test_cancelled_runs_do_not_push_the_schedule_back(registry: Registry) -> None:
     done = registry.start_run(
         "sync:killmails", Trigger.SCHEDULE, {"sweep": False}, now=T0 - timedelta(hours=8)

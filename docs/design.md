@@ -1027,8 +1027,12 @@ same job with the same parameters counts whatever its trigger, so a manual
 sync pushes the next scheduled one back a full interval, and a restart does
 not reset a weekly job. A cancelled run does not count: it stopped before
 finishing, so after a restart its job is due again. An entry with no recorded run is due immediately,
-except the sweeps and `verify`, which wait one interval. No third-party
-scheduler.
+except the sweeps and `verify`, which wait one interval from when the
+scheduler first saw them without a run; that time is kept in registry
+state (`scheduler:first_seen:<label>`), so a restart does not push it back
+(decided 2026-10-20: the interval used to count from startup, and with
+restarts more often than weekly no sweep had run since at least
+2026-10-01). No third-party scheduler.
 
 `entities:refresh` is "continuous" as slices: every `EVEDW_REFRESH_INTERVAL`
 (1 min) a refresh run may send at most `EVEDW_REFRESH_SLICE` (5,000) requests,

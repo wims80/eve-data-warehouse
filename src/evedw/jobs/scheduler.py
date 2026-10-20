@@ -21,6 +21,9 @@ from evedw.store.base import Registry
 
 log = logging.getLogger(__name__)
 
+FIRST_SEEN_STATE = "scheduler:first_seen"
+"""Registry state key prefix for when a deferred entry was first seen without a run."""
+
 Submit = Callable[["ScheduledJob"], Awaitable[ImportRun | None]]
 """Runs the job and returns once it has finished, with the recorded run when there is one."""
 
@@ -32,8 +35,9 @@ class ScheduledJob:
     params: dict[str, Any] = field(default_factory=lambda: {})
     next_due: datetime = field(default_factory=lambda: datetime.now(UTC))
     defer_first: bool = False
-    """When the run log has no matching run, wait one interval instead of running at
-    startup. Set on the expensive weekly jobs."""
+    """When the run log has no matching run, wait one interval from when the scheduler
+    first saw the entry instead of running at startup. Set on the expensive weekly jobs.
+    The first sighting is kept in the registry, so a restart does not push it back."""
     last_run: ImportRun | None = None
 
     @property
@@ -132,10 +136,21 @@ class Scheduler:
                 anchor = last.finished_at or last.started_at
                 job.next_due = max(now, anchor + job.interval)
             elif job.defer_first:
-                job.next_due = now + job.interval
+                job.next_due = max(now, self._first_seen(registry, job, now) + job.interval)
             else:
                 job.next_due = now
             log.info("scheduled %s every %s, next at %s", job.label, job.interval, job.next_due)
+
+    @staticmethod
+    def _first_seen(registry: Registry, job: ScheduledJob, now: datetime) -> datetime:
+        """When the scheduler first saw ``job`` without a run. Until 2026-10-20 this was the
+        startup time, and restarts more often than weekly kept every sweep from running."""
+        key = f"{FIRST_SEEN_STATE}:{job.label}"
+        stored = registry.state_get(key)
+        if stored is not None:
+            return datetime.fromisoformat(stored)
+        registry.state_put(key, now.isoformat(), now=now)
+        return now
 
     def due(self, now: datetime | None = None) -> list[ScheduledJob]:
         now = now or self._now()
