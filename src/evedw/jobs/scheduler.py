@@ -17,6 +17,7 @@ from typing import Any
 
 from evedw.config import Settings
 from evedw.domain.registry import ImportRun, RunStatus
+from evedw.jobs import sweep as sweeps
 from evedw.store.base import Registry
 
 log = logging.getLogger(__name__)
@@ -39,6 +40,9 @@ class ScheduledJob:
     first saw the entry instead of running at startup. Set on the expensive weekly jobs.
     The first sighting is kept in the registry, so a restart does not push it back."""
     last_run: ImportRun | None = None
+    continue_every: timedelta | None = None
+    """For a sync sweep: while its pass is not complete, the next slice runs this long after
+    the previous one instead of a full interval later (design §6)."""
 
     @property
     def label(self) -> str:
@@ -79,15 +83,26 @@ def default_jobs(settings: Settings) -> list[ScheduledJob]:
             settings.sync_interval_zkillboard,
             {"sweep": False, "offline": False, "max_objects": settings.zkillboard_sync_max},
         ),
-        ScheduledJob("sync:killmails", settings.sweep_interval, {"sweep": True}, defer_first=True),
+        ScheduledJob(
+            "sync:killmails",
+            settings.sweep_interval,
+            {"sweep": True},
+            defer_first=True,
+            continue_every=settings.sweep_continue,
+        ),
         ScheduledJob(
             "sync:zkillboard_killmails",
             settings.sweep_interval,
             {"sweep": True, "max_objects": settings.zkillboard_sync_max},
             defer_first=True,
+            continue_every=settings.sweep_continue,
         ),
         ScheduledJob(
-            "sync:market_history", settings.sweep_interval, {"sweep": True}, defer_first=True
+            "sync:market_history",
+            settings.sweep_interval,
+            {"sweep": True},
+            defer_first=True,
+            continue_every=settings.sweep_continue,
         ),
         ScheduledJob(
             "entities:refresh", settings.refresh_interval, {"budget": settings.refresh_slice}
@@ -125,14 +140,21 @@ class Scheduler:
         self._max_sleep = max_sleep
         self._running: dict[str, asyncio.Task[None]] = {}
         """Entries whose run is in progress, by label: never started twice at once."""
+        self._registry: Registry | None = None
+        """Kept by ``seed`` to read sweep progress after each run."""
 
     def seed(self, registry: Registry) -> None:
         """Set every entry's next-due time from its last run in the registry."""
         now = self._now()
+        self._registry = registry
         for job in self.jobs:
             last = next((r for r in registry.runs(job=job.name, limit=50) if job.matches(r)), None)
             job.last_run = last
-            if last is not None:
+            gap = self._gap(job)
+            if gap != job.interval:
+                anchor = (last.finished_at or last.started_at) if last is not None else now
+                job.next_due = max(now, anchor + gap)
+            elif last is not None:
                 anchor = last.finished_at or last.started_at
                 job.next_due = max(now, anchor + job.interval)
             elif job.defer_first:
@@ -140,6 +162,15 @@ class Scheduler:
             else:
                 job.next_due = now
             log.info("scheduled %s every %s, next at %s", job.label, job.interval, job.next_due)
+
+    def _gap(self, job: ScheduledJob) -> timedelta:
+        """Time from the end of a run to the next: ``continue_every`` while the entry's
+        sweep pass is not complete, else the interval."""
+        if job.continue_every is None or self._registry is None:
+            return job.interval
+        if sweeps.load(self._registry, job.name.removeprefix("sync:")).in_progress:
+            return job.continue_every
+        return job.interval
 
     @staticmethod
     def _first_seen(registry: Registry, job: ScheduledJob, now: datetime) -> datetime:
@@ -183,7 +214,7 @@ class Scheduler:
             log.exception("scheduled %s could not be submitted", job.label)
         finally:
             # The interval counts from the end of the run.
-            job.next_due = self._now() + job.interval
+            job.next_due = self._now() + self._gap(job)
             self._running.pop(job.label, None)
 
     async def run_pending(self) -> int:

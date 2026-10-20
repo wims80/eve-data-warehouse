@@ -445,6 +445,16 @@ discover   fetch per-year index.json for the object listing, then HEAD a
            `EVEDW_HEAD_DAYS` (default 30; 120 until 2026-10-09, about 1,200
            HEADs a day; older rewrites are caught by the weekly sweep), and
            on a sweep every object.
+           A sweep runs in slices (decided 2026-10-20): each run HEADs the
+           objects after the cursor, oldest first, for at most
+           `EVEDW_SWEEP_SLICE` (15 minutes), saving the cursor in registry
+           state (`sweep:<dataset>`) every ten objects, and the scheduler runs
+           the next slice `EVEDW_SWEEP_CONTINUE` (an hour) after the last
+           until the pass is complete; `EVEDW_SWEEP_INTERVAL` (a week) then
+           counts from the end of the pass. The first unsliced killmail sweep,
+           2026-10-20 14:59 to 22:04 UTC, reached only 2010-05 (about 880 of
+           6,892 days): EVE Ref answered HEADs of old files at about two a
+           minute (144 429s), and every other archive job waited behind it.
            HEADs run two at a time, as EVE Ref's download guide does
            (`rclone --checkers 2`), and every EVE Ref request starts at
            least `EVEDW_EVEREF_SPACING` (4 s; 0.5 s until 2026-10-19)
@@ -457,7 +467,8 @@ discover   fetch per-year index.json for the object listing, then HEAD a
            while a 4 s start after a quiet stretch (54 requests) and 8 s
            (about 135 requests over two syncs) drew none. A sync of about
            55 requests takes about 4 minutes; a full killmail sweep is
-           about 7,000 requests, about 8 hours. A 429 waits for `Retry-After`, at least 120 seconds,
+           about 7,000 requests, which at the old-file rate is days of
+           slices. A 429 waits for `Retry-After`, at least 120 seconds,
            doubling per attempt up to 10 minutes (30 seconds until
            2026-10-20: EVE Ref sends no `Retry-After`, and on 2026-10-20 the
            retry after 30 s, and the next request after 60 s at the 8 s
@@ -999,7 +1010,7 @@ view per exported file.
 | --- | --- | --- |
 | `sync:killmails` | every 6 h | discover, fetch, import changed objects, newest first |
 | `sync:market_history` | every 6 h | same |
-| `sync:*` with sweep | weekly (`EVEDW_SWEEP_INTERVAL`) | same, but every file's headers are re-checked |
+| `sync:*` with sweep | a slice hourly (`EVEDW_SWEEP_CONTINUE`) during a pass, a pass weekly (`EVEDW_SWEEP_INTERVAL`) | same, and up to `EVEDW_SWEEP_SLICE` of header checks of old files, oldest first |
 | `entities:refresh` | continuous, paced by ESI policy | sweeps, change queue, active refresh, history crawl (section 7.3) |
 | `entities:seed` all | daily (`EVEDW_SEED_INTERVAL`) | import any listed backfill archive not yet seeded |
 | `entities:export` | daily | write entity Parquet snapshots |
@@ -1371,7 +1382,7 @@ Keys: `DATA_DIR`, `BIND`, `MIN_FREE_GB`, `ESI_CONTACT`, `ESI_DAILY_BUDGET`, `ESI
 `ESI_COMPATIBILITY_DATE`, `ESI_REFRESH_INTERVAL`, `ESI_RECENT_DAYS`,
 `EVEREF_BASE_URL`, `EVEREF_SPACING`, `ESI_BASE_URL`, `SYNC_INTERVAL_KILLMAILS`,
 `SYNC_INTERVAL_MARKET`, `SWEEP_INTERVAL`, `REFRESH_INTERVAL`, `REFRESH_SLICE`,
-`EXPORT_INTERVAL`, `SEED_INTERVAL`, `ALLIANCE_SWEEP_INTERVAL`,
+`SWEEP_SLICE`, `SWEEP_CONTINUE`, `EXPORT_INTERVAL`, `SEED_INTERVAL`, `ALLIANCE_SWEEP_INTERVAL`,
 `AFFILIATION_CYCLE`, `VERIFY_INTERVAL`, `HEAD_DAYS`, `LOG_LEVEL`,
 `ZKILLBOARD_BASE_URL`, `ZKILLBOARD_SPACING`, `ZKILLBOARD_DOWNLOAD_SPACING`,
 `ZKILLBOARD_SYNC_MAX`, `SYNC_INTERVAL_ZKILLBOARD`, `ZKILLBOARD_LIVE`,

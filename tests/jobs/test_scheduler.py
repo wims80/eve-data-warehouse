@@ -7,6 +7,7 @@ import pytest
 
 from evedw.config import Settings
 from evedw.domain.registry import ImportRun, RunStatus, Trigger
+from evedw.jobs import sweep as sweeps
 from evedw.jobs.scheduler import ScheduledJob, Scheduler, default_jobs
 from evedw.store.base import Registry
 
@@ -98,6 +99,29 @@ def test_restarts_do_not_push_back_a_deferred_job_that_never_ran(registry: Regis
     # Restarted a day later, and again after the week has passed: still due on schedule.
     assert seed_at(T0 + timedelta(days=1)).next_due == T0 + timedelta(days=7)
     assert seed_at(T0 + timedelta(days=9)).next_due == T0 + timedelta(days=9)
+
+
+def test_a_sweep_pass_in_progress_runs_its_next_slice_soon(registry: Registry) -> None:
+    last = registry.start_run(
+        "sync:killmails", Trigger.SCHEDULE, {"sweep": True}, now=T0 - timedelta(hours=2)
+    )
+    registry.finish_run(last.run_id, RunStatus.SUCCEEDED, now=T0 - timedelta(minutes=30))
+
+    def seeded() -> ScheduledJob:
+        job = ScheduledJob(
+            "sync:killmails",
+            timedelta(days=7),
+            {"sweep": True},
+            defer_first=True,
+            continue_every=timedelta(hours=1),
+        )
+        Scheduler([job], lambda _job: _never(), now=Clock()).seed(registry)
+        return job
+
+    sweeps.save(registry, "killmails", sweeps.SweepProgress(cursor="2010/x", started_at=T0), now=T0)
+    assert seeded().next_due == T0 + timedelta(minutes=30)
+    sweeps.save(registry, "killmails", sweeps.SweepProgress(finished_at=T0), now=T0)
+    assert seeded().next_due == T0 - timedelta(minutes=30) + timedelta(days=7)
 
 
 def test_cancelled_runs_do_not_push_the_schedule_back(registry: Registry) -> None:

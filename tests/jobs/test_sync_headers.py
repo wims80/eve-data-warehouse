@@ -5,8 +5,11 @@ from datetime import date, timedelta
 import pytest
 
 from evedw.domain.datasets import MARKET_HISTORY
-from evedw.domain.registry import RunStatus
-from evedw.jobs.runner import JobCancelled
+from evedw.domain.registry import RunStatus, Trigger
+from evedw.jobs import sweep as sweeps
+from evedw.jobs.importers import importer_for
+from evedw.jobs.runner import JobCancelled, JobRunner
+from evedw.jobs.sync import SyncJob
 from tests.helpers import TODAY, SyncEnv, market_csv_bz2
 
 
@@ -138,3 +141,49 @@ def test_a_stop_during_header_refresh_sends_no_further_heads(env: SyncEnv) -> No
     with pytest.raises(JobCancelled):
         env.client.refresh_headers(found, workers=1, cancel=cancel)
     assert env.fake.requests("HEAD") == 3
+
+
+def test_a_sliced_sweep_checks_old_days_oldest_first_and_resumes(
+    env: SyncEnv, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr("evedw.jobs.sync.SWEEP_CHUNK", 2)
+    days = [TODAY - timedelta(days=400 + n) for n in range(5)]  # outside the header window
+    for day in days:
+        env.fake.put(day, market_csv_bz2(day, rows=100), expected=100)
+    env.sync()
+    heads = {day: env.fake.hits[head_path(day)] for day in days}
+
+    ticks = [0.0]
+
+    def clock() -> float:
+        ticks[0] += 10.0  # each budget check costs ten seconds
+        return ticks[0]
+
+    def slice_run() -> None:
+        job = SyncJob(
+            dataset=MARKET_HISTORY,
+            client=env.client,
+            importer=importer_for(MARKET_HISTORY, env.lake),
+            today=TODAY,
+            sweep=True,
+            sweep_slice=timedelta(seconds=25),
+            clock=clock,
+        )
+        JobRunner(env.settings, env.registry, env.lock).run(
+            "sync:market_history", job, trigger=Trigger.SCHEDULE, params={"sweep": True}
+        )
+
+    slice_run()  # two chunks of two fit the budget: the four oldest days
+    checked = [day for day in days if env.fake.hits[head_path(day)] > heads[day]]
+    assert sorted(checked) == sorted(days)[:4]
+    progress = sweeps.load(env.registry, "market_history")
+    assert progress.in_progress and progress.finished_at is None
+
+    slice_run()  # the newest day is left; the pass completes
+    assert all(env.fake.hits[head_path(day)] == heads[day] + 1 for day in days)
+    progress = sweeps.load(env.registry, "market_history")
+    assert not progress.in_progress and progress.finished_at is not None
+
+
+def head_path(day: date) -> str:
+    return f"HEAD /market-history/{day.year}/market-history-{day.isoformat()}.csv.bz2"

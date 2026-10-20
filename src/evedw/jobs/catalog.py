@@ -290,6 +290,7 @@ class JobCatalog:
                     offline=params["offline"],
                     max_objects=params["max_objects"],
                     head_days=self.settings.head_days,
+                    sweep_slice=self.settings.sweep_slice,
                 )
             finally:
                 client.close()

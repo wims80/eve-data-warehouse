@@ -6,7 +6,8 @@ The loop is the same for every index-driven dataset. What differs per dataset is
 
 import logging
 import shutil
-from collections.abc import Collection, Iterable
+import time
+from collections.abc import Callable, Collection, Iterable
 from dataclasses import dataclass, field, replace
 from datetime import UTC, date, datetime, timedelta
 from pathlib import Path
@@ -24,12 +25,16 @@ from evedw.domain.registry import (
     SourceRevision,
     UpsertSummary,
 )
+from evedw.jobs import sweep as sweeps
 from evedw.jobs.runner import JobCancelled, JobOutcome, RunContext
 from evedw.logs import log_context
 from evedw.sources.everef import CONCURRENCY, EveRefClient, UpstreamChangedError
 from evedw.store.base import PartitionInfo
 
 log = logging.getLogger(__name__)
+
+SWEEP_CHUNK = 10
+"""Objects a sweep slice HEADs between checks of its time budget and saves of its cursor."""
 
 STALE_RUNS = 3
 """Consecutive syncs whose download serves the same other etag than discovery recorded,
@@ -110,6 +115,11 @@ class SyncJob:
     """Objects younger than this always get their file headers refreshed."""
     sweep: bool = False
     """Refresh headers of every object, catching rewrites of old days."""
+    sweep_slice: timedelta | None = None
+    """With ``sweep``, check headers for at most this long, oldest objects first, and keep
+    the cursor in registry state so the next sweep run continues the pass (design §6).
+    None sweeps every object in one run."""
+    clock: Callable[[], float] = time.monotonic
     head_workers: int = CONCURRENCY
     max_objects: int | None = None
     """Import at most this many objects, newest first, and leave the rest for the next run:
@@ -198,7 +208,7 @@ class SyncJob:
                 continue
             known = existing.get(obj.object_key)
             if (
-                self.sweep
+                (self.sweep and self.sweep_slice is None)
                 or known is None
                 # A pending object is about to be downloaded, so its headers must be fresh;
                 # from an unchanged listing they were checked when it last changed, unless
@@ -227,16 +237,63 @@ class SyncJob:
                     size=known.upstream_size,
                     last_modified=known.upstream_last_modified,
                 )
-        if not selected:
-            return found
-        log.info("refreshing headers of %d of %d objects", len(selected), len(found))
-        refreshed = self.client.refresh_headers(
-            (found[i] for i in selected), workers=self.head_workers, cancel=ctx.check_cancelled
-        )
         result = list(found)
-        for index, obj in zip(selected, refreshed, strict=True):
-            result[index] = obj
+        if selected:
+            log.info("refreshing headers of %d of %d objects", len(selected), len(found))
+            refreshed = self.client.refresh_headers(
+                (found[i] for i in selected), workers=self.head_workers, cancel=ctx.check_cancelled
+            )
+            for index, obj in zip(selected, refreshed, strict=True):
+                result[index] = obj
+        if self.sweep and self.sweep_slice is not None and not ranged:
+            self._sweep_slice(ctx, result, self.sweep_slice, checked=set(selected))
         return result
+
+    def _sweep_slice(
+        self,
+        ctx: RunContext,
+        found: list[DiscoveredObject],
+        budget: timedelta,
+        *,
+        checked: set[int],
+    ) -> None:
+        """HEAD the objects after the sweep cursor, oldest first, until ``budget`` is spent,
+        replacing them in ``found``. The cursor is saved after every chunk, so a cancelled
+        slice keeps its progress; the pass is complete once no object is left after it."""
+        registry = ctx.registry
+        progress = sweeps.load(registry, self.dataset.name)
+        if not progress.in_progress:
+            progress = replace(progress, started_at=datetime.now(UTC))
+        after = progress.cursor or ""
+        order = sorted(
+            (i for i, obj in enumerate(found) if i not in checked and obj.object_key > after),
+            key=lambda i: found[i].object_key,
+        )
+        deadline = self.clock() + budget.total_seconds()
+        done = 0
+        for start in range(0, len(order), SWEEP_CHUNK):
+            if self.clock() >= deadline:
+                break
+            chunk = order[start : start + SWEEP_CHUNK]
+            refreshed = self.client.refresh_headers(
+                (found[i] for i in chunk), workers=self.head_workers, cancel=ctx.check_cancelled
+            )
+            for index, obj in zip(chunk, refreshed, strict=True):
+                found[index] = obj
+            done += len(chunk)
+            progress = replace(progress, cursor=found[chunk[-1]].object_key)
+            sweeps.save(registry, self.dataset.name, progress, now=datetime.now(UTC))
+        else:
+            progress = replace(progress, cursor=None, finished_at=datetime.now(UTC))
+            sweeps.save(registry, self.dataset.name, progress, now=datetime.now(UTC))
+            log.info("sweep: checked %d headers, pass complete", done)
+            return
+        log.info(
+            "sweep: checked %d headers this slice, %d left in the pass, up to %s",
+            done,
+            len(order) - done,
+            progress.cursor,
+        )
 
     def _in_range(self, day: date | None) -> bool:
         """True when an explicit range was given and ``day`` falls inside it."""

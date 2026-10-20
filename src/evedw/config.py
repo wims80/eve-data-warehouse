@@ -67,6 +67,11 @@ class Settings(BaseSettings):
     sync_interval_killmails: timedelta = Field(default=timedelta(hours=6))
     sync_interval_market: timedelta = Field(default=timedelta(hours=6))
     sweep_interval: timedelta = Field(default=timedelta(days=7))
+    """Time from the end of one complete header sweep to the start of the next."""
+    sweep_slice: timedelta = Field(default=timedelta(minutes=15))
+    """How long one sweep run checks headers before leaving the rest of the pass for later."""
+    sweep_continue: timedelta = Field(default=timedelta(hours=1))
+    """Pause between the slices of a sweep pass that is not complete yet."""
     refresh_interval: timedelta = Field(default=timedelta(minutes=1))
     """Pause between scheduled ``entities:refresh`` slices."""
     refresh_slice: int = 5_000
@@ -107,6 +112,8 @@ class Settings(BaseSettings):
         "sync_interval_market",
         "sync_interval_zkillboard",
         "sweep_interval",
+        "sweep_slice",
+        "sweep_continue",
         "refresh_interval",
         "export_interval",
         "seed_interval",

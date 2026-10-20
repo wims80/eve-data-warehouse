@@ -140,7 +140,13 @@ change upstream, it is fetched as a new revision.
 
 To catch upstream rewrites of old days without re-importing anything,
 `--sweep` re-checks the headers of every file and imports only what moved.
-The weekly scheduled sweep does the same.
+A sweep runs in slices: each run checks headers for `EVEDW_SWEEP_SLICE`
+(15 minutes), oldest files first, and records where it stopped; the next
+slice runs `EVEDW_SWEEP_CONTINUE` (an hour) later until the pass is
+complete, and the next pass starts `EVEDW_SWEEP_INTERVAL` (a week) after
+that. Other archive jobs never wait behind more than one slice. A manual
+`--sweep` starts or continues the pass. The progress of each dataset's
+pass is logged as `sweep: checked N headers this slice, M left in the pass`.
 
 ## Raising `parser_version`
 
