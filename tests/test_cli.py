@@ -200,6 +200,31 @@ def test_sync_is_sent_to_the_running_service(
     assert result.exit_code == 1 and "HTTP 422: from: not a date" in result.output
 
 
+def test_sync_accepts_zkillboard_history_and_refuses_the_entity_backfill(
+    data_dir: Path, service: respx.Router
+) -> None:
+    sweep = service.post(f"{SERVICE}/jobs/sync:zkillboard_killmails").mock(
+        return_value=httpx.Response(
+            202,
+            json={
+                "run_id": "r-3",
+                "job": "sync:zkillboard_killmails",
+                "status": "queued",
+                "params": {"sweep": True},
+            },
+        )
+    )
+    result = runner.invoke(
+        app,
+        ["--data-dir", str(data_dir), "sync", "zkillboard_killmails", "--sweep", "--no-wait"],
+    )
+    assert result.exit_code == 0, result.output
+    assert json.loads(sweep.calls.last.request.content)["sweep"] is True
+
+    result = runner.invoke(app, ["--data-dir", str(data_dir), "sync", "entities_backfill"])
+    assert result.exit_code == 2 and "use `evedw entities seed`" in result.output
+
+
 def test_status_and_verify_use_the_service(data_dir: Path, service: respx.Router) -> None:
     result = runner.invoke(app, ["--data-dir", str(data_dir), "status"])
     assert result.exit_code == 0, result.output

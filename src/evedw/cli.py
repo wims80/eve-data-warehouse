@@ -403,7 +403,8 @@ def sync(
         ds = get_dataset(dataset)
     except KeyError as exc:
         raise _fail(exc.args[0], code=2) from None
-    if ds.index_path is None:
+    if ds.name not in SYNC_DATASETS:
+        # zKillboard history has no per-year index but is synced by date like EVE Ref.
         raise _fail(f"{ds.name} is not synced by date; use `evedw entities seed`", code=2)
     run = _dispatch(
         settings,
