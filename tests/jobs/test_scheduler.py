@@ -124,6 +124,23 @@ def test_a_sweep_pass_in_progress_runs_its_next_slice_soon(registry: Registry) -
     assert seeded().next_due == T0 - timedelta(minutes=30) + timedelta(days=7)
 
 
+def test_a_manual_sweep_brings_the_scheduled_slices_forward(registry: Registry) -> None:
+    job = ScheduledJob(
+        "sync:killmails",
+        timedelta(days=7),
+        {"sweep": True},
+        defer_first=True,
+        continue_every=timedelta(hours=1),
+    )
+    scheduler = Scheduler([job], lambda _job: _never(), now=Clock())
+    scheduler.seed(registry)
+    assert job.next_due == T0 + timedelta(days=7)
+    # A manual slice has started a pass outside the schedule.
+    sweeps.save(registry, "killmails", sweeps.SweepProgress(cursor="2008/x", started_at=T0), now=T0)
+    scheduler.follow_sweeps()
+    assert job.next_due == T0 + timedelta(hours=1)
+
+
 def test_cancelled_runs_do_not_push_the_schedule_back(registry: Registry) -> None:
     done = registry.start_run(
         "sync:killmails", Trigger.SCHEDULE, {"sweep": False}, now=T0 - timedelta(hours=8)

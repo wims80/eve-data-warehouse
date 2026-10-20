@@ -195,9 +195,22 @@ class Scheduler:
         can be in the past; counting it would make ``run_forever`` spin (2026-10-11)."""
         return min((j.next_due for j in self.jobs if j.label not in self._running), default=None)
 
+    def follow_sweeps(self) -> None:
+        """Bring a sweep entry's next run within ``continue_every`` when its pass is in
+        progress: a manual ``--sweep`` starts a pass outside the schedule."""
+        now = self._now()
+        for job in self.jobs:
+            if job.continue_every is None or job.label in self._running:
+                continue
+            soon = now + job.continue_every
+            if job.next_due > soon and self._gap(job) == job.continue_every:
+                job.next_due = soon
+                log.info("sweep pass in progress: %s next at %s", job.label, job.next_due)
+
     def start_due(self) -> list[asyncio.Task[None]]:
         """Start every due entry that is not already running, in due order, without waiting
         for any of them: the worker's lanes decide what runs at once (design §8)."""
+        self.follow_sweeps()
         started: list[asyncio.Task[None]] = []
         for job in self.due():
             task = asyncio.create_task(self._run(job), name=f"evedw-scheduled-{job.label}")
