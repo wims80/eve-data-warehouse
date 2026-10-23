@@ -48,3 +48,37 @@ def test_verify_detects_each_kind_of_drift(env: SyncEnv) -> None:
     )
     assert [i.kind for i in ranged.issues] == ["raw_hash"]
     assert date(2026, 10, 2) == D2
+
+
+def test_count_gap_from_a_republished_day_is_a_note(env: SyncEnv) -> None:
+    publish_three_days(env.fake)
+    env.sync()
+    # Upstream republishes D3 with late rows after the sync; totals.json already counts them.
+    env.fake.put(D3, market_csv_bz2(D3, rows=105), expected=105)
+    # Upstream totals for D2 change while the file stays the same.
+    env.fake.totals[MARKET_HISTORY.totals_key(D2)] = 201
+
+    report = verify_dataset(
+        env.settings,
+        env.registry,
+        env.lake,
+        MARKET_HISTORY,
+        totals=env.fake.totals,
+        client=env.client,
+    )
+    assert [(i.kind, i.object_key) for i in report.issues] == [
+        ("expected_count", "2026/market-history-2026-10-02.csv.bz2")
+    ]
+    assert [(n.kind, n.object_key) for n in report.notes] == [
+        ("upstream_ahead", "2026/market-history-2026-10-03.csv.bz2")
+    ]
+    assert "totals.json says 105, imported 100" in report.notes[0].detail
+    assert env.fake.requests("HEAD", suffix="2026-10-03.csv.bz2") >= 1
+
+    offline = verify_dataset(
+        env.settings, env.registry, env.lake, MARKET_HISTORY, totals=env.fake.totals
+    )
+    assert sorted(i.object_key or "" for i in offline.issues if i.kind == "expected_count") == [
+        "2026/market-history-2026-10-02.csv.bz2",
+        "2026/market-history-2026-10-03.csv.bz2",
+    ]

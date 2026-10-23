@@ -485,6 +485,7 @@ def verify(
                 date_to=_day(date_to),
                 hash_raw=not no_hash,
                 totals=totals,
+                client=client,
             )
             reports.append(report)
             failed = failed or not report.ok

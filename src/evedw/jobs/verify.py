@@ -11,7 +11,7 @@ from pathlib import Path
 
 from evedw.config import Settings
 from evedw.domain.datasets import Dataset
-from evedw.domain.registry import ObjectStatus
+from evedw.domain.registry import DiscoveredObject, ObjectStatus, SourceObject, SourceRevision
 from evedw.domain.schemas import (
     DAILY_SOURCES,
     DATASET_TABLES,
@@ -95,12 +95,16 @@ def verify_dataset(
     date_to: date | None = None,
     hash_raw: bool = True,
     totals: Mapping[str, int] | None = None,
+    client: EveRefClient | None = None,
 ) -> VerifyReport:
+    """``client``, when given, HEADs each file whose count disagrees with ``totals``, so a
+    day upstream has republished since the last sync is a note rather than an issue."""
     report = VerifyReport(dataset=dataset.name)
     tables = DATASET_TABLES.get(dataset.name, ())
     partitions = {table: {p.partition: p for p in lake.partitions(table)} for table in tables}
     objects = registry.objects(dataset=dataset.name, date_from=date_from, date_to=date_to)
     imported_dates: set[date] = set()
+    mismatches: list[tuple[SourceObject, SourceRevision, int]] = []
 
     for obj in objects:
         live = obj.status in (ObjectStatus.IMPORTED, ObjectStatus.PROVISIONAL)
@@ -188,14 +192,9 @@ def verify_dataset(
         elif totals is not None and obj.logical_date is not None:
             expected = totals.get(dataset.totals_key(obj.logical_date))
             if expected is not None and expected != revision.observed_count:
-                report.issues.append(
-                    Issue(
-                        dataset.name,
-                        obj.object_key,
-                        "expected_count",
-                        f"totals.json says {expected}, imported {revision.observed_count}",
-                    )
-                )
+                mismatches.append((obj, revision, expected))
+
+    _check_counts(report, dataset, mismatches, client)
 
     if date_from is None and date_to is None:
         for table in tables:
@@ -206,6 +205,55 @@ def verify_dataset(
                         Issue(dataset.name, None, "orphan_partition", f"{table}/{name}")
                     )
     return report
+
+
+def _check_counts(
+    report: VerifyReport,
+    dataset: Dataset,
+    mismatches: list[tuple[SourceObject, SourceRevision, int]],
+    client: EveRefClient | None,
+) -> None:
+    """totals.json counts the file upstream serves now, which can be newer than the last
+    sync's: on 2026-10-19 all 18 mismatched killmail days had been republished hours
+    before verify ran. A HEAD that reports another etag than the imported revision's makes
+    the gap a note; an unchanged etag, or a HEAD that fails, leaves it an issue."""
+    if not mismatches:
+        return
+    served: dict[str, str | None] = {}
+    if client is not None:
+        probes = [
+            DiscoveredObject(
+                dataset=dataset.name,
+                object_key=obj.object_key,
+                url=obj.url,
+                logical_date=obj.logical_date,
+                etag=revision.upstream_etag,
+                size=None,
+                last_modified=None,
+                expected_count=expected,
+            )
+            for obj, revision, expected in mismatches
+        ]
+        served = {seen.object_key: seen.etag for seen in client.refresh_headers(probes)}
+    for obj, revision, expected in mismatches:
+        etag = served.get(obj.object_key)
+        gap = f"totals.json says {expected}, imported {revision.observed_count}"
+        if (
+            etag is not None
+            and revision.upstream_etag is not None
+            and etag != revision.upstream_etag
+        ):
+            report.notes.append(
+                Issue(
+                    dataset.name,
+                    obj.object_key,
+                    "upstream_ahead",
+                    f"{obj.object_key}: {gap} from revision {revision.revision}; upstream "
+                    "serves a newer file, which the next sync imports",
+                )
+            )
+        else:
+            report.issues.append(Issue(dataset.name, obj.object_key, "expected_count", gap))
 
 
 MERGED = "killmails:merged"
@@ -301,6 +349,7 @@ class VerifyJob:
                 date_to=self.date_to,
                 hash_raw=self.hash_raw,
                 totals=totals,
+                client=client,
             )
             checked += report.objects_checked
             issues.extend(report.issues)

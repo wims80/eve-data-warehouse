@@ -1352,7 +1352,14 @@ so the pacing is ours, and gentle:
   partition whose row count equals the revision's `observed_count`.
 - Every current revision's raw file exists and its sha256 matches.
 - `observed_count` versus `expected_count` from a fresh totals.json;
-  mismatches listed with the gap.
+  mismatches listed with the gap. Unless offline, each mismatched file gets
+  one HEAD (decided 2026-10-24): when upstream serves another etag than the
+  imported revision's, totals.json is counting a newer file the next sync
+  will import, and the gap is an `upstream_ahead` note, not an issue. An
+  unchanged etag, or a failed HEAD, keeps it an `expected_count` issue. On
+  2026-10-19 the weekly verify failed on 18 killmail days 1 to 8 short;
+  each day's matching archive had been built 7 to 11 hours before verify
+  ran, and its own count equalled what the next sync imported.
 - Partitions on disk with no registry row, and the reverse.
 - Unknown JSON keys recorded by imports.
 - Raw files the warehouse stores gzip-compressed (zKillboard's day files)
