@@ -302,7 +302,7 @@ cycle has caught up with what changed since the last backfill.
 
 ## ESI pace and error rates
 
-Requests go out 0.05 s apart when calm (`EVEDW_ESI_SPACING`). Warning signs
+Requests go out 0.1 s apart when calm (`EVEDW_ESI_SPACING`). Warning signs
 (errors piling up in ESI's error window, 429, 5xx, timeouts) double the
 spacing up to 2 s; five quiet minutes halve it again (design §11). To see
 whether that is happening:

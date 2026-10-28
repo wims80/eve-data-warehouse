@@ -31,7 +31,7 @@ class Settings(BaseSettings):
 
     esi_contact: str | None = None
     esi_daily_budget: int = 800_000
-    esi_spacing: float = 0.05
+    esi_spacing: float = 0.1
     """Seconds between ESI requests when calm; warning signs slow it to 2 s (design §11)."""
     # Latest date listed by https://esi.evetech.net/meta/compatibility-dates on 2026-10-05.
     # Re-check the endpoint specification when changing it (design §11).

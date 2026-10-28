@@ -955,7 +955,9 @@ characters, one request each) completes in about a month. The budget was
 one-second spacing on 2026-10-07, then
 300,000, which the drain slightly exceeded; it was raised to 800,000 with
 the 0.05 s floor on 2026-10-08 after a clean first cycle (0 errors, 0
-slowdowns), so it stays a safety cap above what the pace can send.
+slowdowns), so it stays a safety cap above what the pace can send. The
+floor is 0.1 s again since 2026-10-27 (section 11), about 470,000 a day, so
+character history takes about five weeks.
 `evedw entities status` shows the sweep state and the queue per class.
 
 First live run (M6 acceptance, 2026-10-07 and 08):
@@ -1174,11 +1176,17 @@ Binding for every ESI request made by this project, including ad hoc scripts.
   for the routes we use (none sends `X-RateLimit-Group`); what gets an
   application banned is ignoring the error limit or getting around the cache
   (developers.eveonline.com, checked 2026-10-07). So the next request waits
-  `EVEDW_ESI_SPACING` (0.05 s; 0.2 s until 2026-10-08, then briefly 0.1 s)
-  after the previous response when calm, which with one request in flight
-  is at most 20 a second, in practice about 6 for small GETs because ESI's
-  response time (about 0.1 s, measured 2026-10-08 with the service at 10%
-  CPU) adds to the gap. CCP's
+  `EVEDW_ESI_SPACING` (0.1 s; 0.2 s until 2026-10-08, then briefly 0.1 s,
+  0.05 s from 2026-10-08 to 2026-10-27) after the previous response when
+  calm, which with one request in flight is at most 10 a second, in practice
+  about 5 for small GETs because ESI's response time (about 0.1 s, measured
+  2026-10-08 with the service at 10% CPU) adds to the gap. The floor went
+  back to 0.1 s on 2026-10-27 (decided 2026-10-27): at 0.05 s the refresh
+  drew a lone 429 on `/characters/{id}/corporationhistory` every one to
+  five hours from 2026-10-25 (error limit untouched, 99 left), and on
+  2026-10-27 13:09 UTC a run of 504s and a 520 on the same route; 0.1 s
+  costs about 14% of the throughput (325 instead of 377 GETs a minute) for
+  twice the gap. CCP's
   pages (rate limiting and best practices, checked 2026-10-08) set no
   request-rate cap for routes without a bucket and ask only that the shared
   API is not abused and that clients do not operate at a limit; a steady
