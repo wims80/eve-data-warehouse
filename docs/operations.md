@@ -87,8 +87,10 @@ without starting. Nothing is left half-written: an object that was being
 imported is redone by the next sync. A cancelled run does not count for the
 schedule, so a restart picks its job up again straight away.
 
-What the scheduler does on its own (design §8): a sync of each dataset every
-6 h, a header sweep of every file weekly, a check for new entity backfill
+What the scheduler does on its own (design §8): a sync of market history
+every 6 h, of zKillboard's history hourly and of EVE Ref's killmails daily, a
+weekly header sweep of every market and zKillboard history file (EVE Ref
+killmails only with `EVEDW_SWEEP_KILLMAILS=true`), a check for new entity backfill
 archives daily (all unseeded ones are imported), the entity Parquet export
 daily, `verify` weekly. `entities:refresh` is scheduled only when
 `EVEDW_ESI_CONTACT` is set to a real contact; leave it empty to keep the

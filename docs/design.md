@@ -703,6 +703,23 @@ copies are 1 to 5 killmails short of `totals.json`. `verify` with hashing
 covers all datasets in about 7 minutes, most of it decompressing
 zKillboard's raw files.
 
+EVE Ref's killmails become a cross-check (decided 2026-10-30). Counted
+that day over the merged layer, 96,038,530 killmails from 2007-12-05 to
+2026-10-30: 95,964,378 (99.92%) in both histories; 47,612 in zKillboard's
+only (15,516 of 2026-10-29/30, which EVE Ref had not published yet, 14,896
+of 2026-07-13, and 17,200 over 459 other days, clustered around 2026-07-13);
+21,749 in EVE Ref's only, all of 2023-05-06 to 2023-05-08; and 4,791 only in
+the live feed, nearly all of the day itself. EVE Ref has held nothing
+zKillboard lacks since 2023-05-08, while its weekly killmail sweep (about
+7,000 HEADs at the 4 to 8 s pace of section 6) found every old file
+unchanged. So `sync:killmails` runs daily instead of every 6 h, still a
+second source should zKillboard's history lose days again as it did in
+2023-05, and still compared by `verify`; the killmail sweep is not
+scheduled unless `EVEDW_SWEEP_KILLMAILS` is set, and a manual `evedw sync
+killmails --sweep` still runs one. The pass in progress that day was left
+to finish before the change was deployed. Market history and zKillboard's
+history keep their weekly sweeps.
+
 Live killmails (decided 2026-10-12, M9). A follower inside the service
 reads zKillboard's live feed one sequence at a time (section 11a) and appends
 every object, as served, to an hourly NDJSON file under
@@ -1010,9 +1027,9 @@ view per exported file.
 
 | job | default interval | what it does |
 | --- | --- | --- |
-| `sync:killmails` | every 6 h | discover, fetch, import changed objects, newest first |
+| `sync:killmails` | daily (every 6 h until 2026-10-30) | discover, fetch, import changed objects, newest first |
 | `sync:market_history` | every 6 h | same |
-| `sync:*` with sweep | a slice hourly (`EVEDW_SWEEP_CONTINUE`) during a pass, a pass weekly (`EVEDW_SWEEP_INTERVAL`) | same, and up to `EVEDW_SWEEP_SLICE` of header checks of old files, oldest first |
+| `sync:*` with sweep (not `killmails` since 2026-10-30, `EVEDW_SWEEP_KILLMAILS`) | a slice hourly (`EVEDW_SWEEP_CONTINUE`) during a pass, a pass weekly (`EVEDW_SWEEP_INTERVAL`) | same, and up to `EVEDW_SWEEP_SLICE` of header checks of old files, oldest first |
 | `entities:refresh` | continuous, paced by ESI policy | sweeps, change queue, active refresh, history crawl (section 7.3) |
 | `entities:seed` all | daily (`EVEDW_SEED_INTERVAL`) | import any listed backfill archive not yet seeded |
 | `entities:export` | daily | write entity Parquet snapshots |
@@ -1396,7 +1413,7 @@ resolves against the current directory, where it was typed.
 Keys: `DATA_DIR`, `BIND`, `MIN_FREE_GB`, `ESI_CONTACT`, `ESI_DAILY_BUDGET`, `ESI_SPACING`,
 `ESI_COMPATIBILITY_DATE`, `ESI_REFRESH_INTERVAL`, `ESI_RECENT_DAYS`,
 `EVEREF_BASE_URL`, `EVEREF_SPACING`, `ESI_BASE_URL`, `SYNC_INTERVAL_KILLMAILS`,
-`SYNC_INTERVAL_MARKET`, `SWEEP_INTERVAL`, `REFRESH_INTERVAL`, `REFRESH_SLICE`,
+`SYNC_INTERVAL_MARKET`, `SWEEP_INTERVAL`, `SWEEP_KILLMAILS`, `REFRESH_INTERVAL`, `REFRESH_SLICE`,
 `SWEEP_SLICE`, `SWEEP_CONTINUE`, `EXPORT_INTERVAL`, `SEED_INTERVAL`, `ALLIANCE_SWEEP_INTERVAL`,
 `AFFILIATION_CYCLE`, `VERIFY_INTERVAL`, `HEAD_DAYS`, `LOG_LEVEL`,
 `ZKILLBOARD_BASE_URL`, `ZKILLBOARD_SPACING`, `ZKILLBOARD_DOWNLOAD_SPACING`,

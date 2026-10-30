@@ -64,10 +64,13 @@ class Settings(BaseSettings):
     """How often the follower writes newly fetched killmails to the lake."""
     esi_base_url: str = "https://esi.evetech.net"
 
-    sync_interval_killmails: timedelta = Field(default=timedelta(hours=6))
+    sync_interval_killmails: timedelta = Field(default=timedelta(days=1))
+    """EVE Ref killmails are a cross-check of zKillboard's history since 2026-10-30 (§7.1)."""
     sync_interval_market: timedelta = Field(default=timedelta(hours=6))
     sweep_interval: timedelta = Field(default=timedelta(days=7))
     """Time from the end of one complete header sweep to the start of the next."""
+    sweep_killmails: bool = False
+    """Schedule the header sweep of EVE Ref's killmail archives (off since 2026-10-30, §7.1)."""
     sweep_slice: timedelta = Field(default=timedelta(minutes=15))
     """How long one sweep run checks headers before leaving the rest of the pass for later."""
     sweep_continue: timedelta = Field(default=timedelta(hours=1))

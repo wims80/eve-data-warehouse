@@ -83,12 +83,18 @@ def default_jobs(settings: Settings) -> list[ScheduledJob]:
             settings.sync_interval_zkillboard,
             {"sweep": False, "offline": False, "max_objects": settings.zkillboard_sync_max},
         ),
-        ScheduledJob(
-            "sync:killmails",
-            settings.sweep_interval,
-            {"sweep": True},
-            defer_first=True,
-            continue_every=settings.sweep_continue,
+        *(
+            [
+                ScheduledJob(
+                    "sync:killmails",
+                    settings.sweep_interval,
+                    {"sweep": True},
+                    defer_first=True,
+                    continue_every=settings.sweep_continue,
+                )
+            ]
+            if settings.sweep_killmails
+            else []
         ),
         ScheduledJob(
             "sync:zkillboard_killmails",

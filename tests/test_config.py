@@ -10,7 +10,8 @@ from evedw.config import Settings, project_home
 def test_defaults(settings: Settings) -> None:
     assert settings.bind == "127.0.0.1:8470"
     assert settings.min_free_gb == 20.0
-    assert settings.sync_interval_killmails == timedelta(hours=6)
+    assert settings.sync_interval_killmails == timedelta(days=1)
+    assert settings.sweep_killmails is False
     assert settings.warehouse_path == settings.data_dir / "warehouse.duckdb"
     assert settings.lock_path.parent == settings.data_dir
 

@@ -28,7 +28,6 @@ def test_default_jobs_skip_refresh_without_contact(settings: Settings) -> None:
         "sync:killmails",
         "sync:market_history",
         "sync:zkillboard_killmails",
-        "sync:killmails sweep",
         "sync:zkillboard_killmails sweep",
         "sync:market_history sweep",
         "entities:seed",
@@ -36,6 +35,8 @@ def test_default_jobs_skip_refresh_without_contact(settings: Settings) -> None:
         "entities:export",
         "verify hash",
     ]
+    settings.sweep_killmails = True
+    assert "sync:killmails sweep" in [j.label for j in default_jobs(settings)]
     settings.esi_contact = "ops@example.test"
     with_refresh = {j.name: j for j in default_jobs(settings)}
     assert with_refresh["entities:refresh"].params == {"budget": settings.refresh_slice}
