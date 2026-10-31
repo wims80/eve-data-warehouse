@@ -414,7 +414,7 @@ def test_without_a_restart_a_healthy_status_resumes_after_the_deadline(
 
 
 def test_esi_requests_are_never_in_flight_at_once_across_clients(
-    cache: MemoryCache, policy_path: Path, tmp_path: Path
+    cache: MemoryCache, clock: FakeClock, policy_path: Path, tmp_path: Path
 ) -> None:
     import threading
     import time
@@ -444,7 +444,8 @@ def test_esi_requests_are_never_in_flight_at_once_across_clients(
             daily_budget=1000,
             spacing=0.0,
             client=httpx.Client(transport=transport),
-            sleep=lambda _: None,
+            sleep=clock.sleep,
+            clock=clock.time,
         )
         for n in range(2)
     ]
